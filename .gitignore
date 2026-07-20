@@ -1,0 +1,16 @@
+# Virtual environment (created by launcher scripts)
+.venv/
+
+# Runtime trace data (recreated automatically on first action)
+data/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# macOS metadata
+.DS_Store
+._*
+
+# Claude Code local session state (keep launch.json)
+.claude/settings.local.json

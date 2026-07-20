@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TraceAct Demo</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header>
+    <div class="header-inner">
+      <div class="brand">
+        <span class="brand-icon">⬡</span>
+        <span class="brand-name">TraceAct</span>
+        <span class="brand-sub">demo</span>
+      </div>
+      <div class="header-meta">
+        traces written to <code>data/traces/traces.jsonl</code>
+      </div>
+    </div>
+  </header>
+
+  <div class="app-body">
+
+    <!-- ================================================================
+         Sidebar — fireable actions
+         ================================================================ -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title">Fire an action</div>
+        <input id="action-search" type="text" placeholder="Filter actions…"
+               oninput="filterActions(this.value)" autocomplete="off" />
+      </div>
+
+      <div id="sidebar-actions">
+
+        <div class="action-card" data-label="create note">
+          <div class="card-top">
+            <span class="card-name">Create note</span>
+            <button class="btn btn-xs btn-primary" onclick="createNote()">Run</button>
+          </div>
+          <div class="card-inputs">
+            <input type="text" id="note-title" placeholder="Title" value="My First Note" />
+            <input type="text" id="note-body"  placeholder="Body"  value="This is the note body." />
+          </div>
+        </div>
+
+        <div class="action-card" data-label="generate number">
+          <div class="card-top">
+            <span class="card-name">Generate number</span>
+            <button class="btn btn-xs btn-primary" onclick="generateNumber()">Run</button>
+          </div>
+        </div>
+
+        <div class="action-card" data-label="save message">
+          <div class="card-top">
+            <span class="card-name">Save message</span>
+            <button class="btn btn-xs btn-primary" onclick="saveMessage()">Run</button>
+          </div>
+          <div class="card-inputs">
+            <input type="text" id="message-body" placeholder="Message" value="Hello, world!" />
+          </div>
+        </div>
+
+        <div class="action-card" data-label="fake api call">
+          <div class="card-top">
+            <span class="card-name">Fake API call</span>
+            <button class="btn btn-xs btn-primary" onclick="fakeApiCall()">Run</button>
+          </div>
+        </div>
+
+        <div class="action-card" data-label="trigger error">
+          <div class="card-top">
+            <span class="card-name">Trigger error</span>
+            <button class="btn btn-xs btn-danger" onclick="triggerError()">Run</button>
+          </div>
+        </div>
+
+        <div class="action-card" data-label="user login">
+          <div class="card-top">
+            <span class="card-name">User login</span>
+            <button class="btn btn-xs btn-primary" onclick="authLogin()">Run</button>
+          </div>
+          <div class="card-inputs">
+            <input type="text" id="login-username" placeholder="Username" value="alice" />
+          </div>
+        </div>
+
+        <div class="action-card" data-label="email campaign">
+          <div class="card-top">
+            <span class="card-name">Email campaign</span>
+            <button class="btn btn-xs btn-primary" onclick="emailCampaign()">Run</button>
+          </div>
+          <div class="card-inputs">
+            <input type="text" id="campaign-subject" placeholder="Subject" value="Monthly Newsletter" />
+          </div>
+        </div>
+
+        <div class="action-card" data-label="export report">
+          <div class="card-top">
+            <span class="card-name">Export report</span>
+            <button class="btn btn-xs btn-primary" onclick="reportExport()">Run</button>
+          </div>
+        </div>
+
+        <div class="action-card" data-label="dispatch webhook">
+          <div class="card-top">
+            <span class="card-name">Dispatch webhook</span>
+            <button class="btn btn-xs btn-primary" onclick="webhookDispatch()">Run</button>
+          </div>
+        </div>
+
+        <div class="action-card" data-label="bulk import">
+          <div class="card-top">
+            <span class="card-name">Bulk import</span>
+            <button class="btn btn-xs btn-primary" onclick="importBulk()">Run</button>
+          </div>
+          <div class="card-inputs">
+            <input type="number" id="import-rows" placeholder="Row count" value="100" min="1" max="1000" />
+          </div>
+        </div>
+
+      </div><!-- /#sidebar-actions -->
+    </aside>
+
+    <!-- Drag-to-resize handle -->
+    <div id="drag-handle"></div>
+
+    <!-- ================================================================
+         Main pane — status bar + tabs + TraceLog / TraceMap
+         ================================================================ -->
+    <main id="main-pane">
+
+      <!-- Status bar -->
+      <div class="status-bar">
+        <span id="status-msg" class="status-msg"></span>
+        <div class="status-bar-actions">
+          <button class="btn btn-sm btn-ghost-danger"
+                  data-tooltip="Deletes traces.jsonl and resets the viewer. The file is recreated on the next action."
+                  onclick="clearTraces()">Clear traces</button>
+          <button class="btn btn-sm btn-ghost" onclick="loadTraces()">↺ Refresh</button>
+        </div>
+      </div>
+
+      <!-- Tab bar -->
+      <div class="viewer-tabs-bar">
+        <div class="viewer-tabs">
+          <button class="tab-btn active" id="tab-log" onclick="switchTab('log')">TraceLog</button>
+          <button class="tab-btn" id="tab-map" onclick="switchTab('map')">TraceMap</button>
+        </div>
+      </div>
+
+      <!-- ── TraceLog pane ─────────────────────────────────────── -->
+      <div id="pane-log" class="tab-pane active">
+        <div class="trace-section">
+          <div id="trace-container">
+            <div class="empty-state">No traces yet. Fire an action.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── TraceMap pane ─────────────────────────────────────── -->
+      <div id="pane-map" class="tab-pane">
+
+        <div class="map-canvas-wrap">
+
+          <!-- Zoom controls (absolute, top-right of canvas) -->
+          <div class="map-zoom-controls">
+            <button class="zoom-btn" onclick="mapZoom(1.25)" title="Zoom in">+</button>
+            <span id="map-zoom-label" class="zoom-label">100%</span>
+            <button class="zoom-btn" onclick="mapZoom(0.8)" title="Zoom out">−</button>
+            <button class="zoom-btn zoom-reset" onclick="mapZoomReset()" title="Reset zoom">⊙</button>
+          </div>
+
+          <svg id="trace-map-svg"
+               viewBox="0 0 800 460"
+               overflow="visible"
+               xmlns="http://www.w3.org/2000/svg"
+               aria-label="TraceMap — system component graph">
+
+            <defs>
+              <pattern id="dot-grid" x="0" y="0" width="24" height="24"
+                       patternUnits="userSpaceOnUse">
+                <circle cx="1" cy="1" r="1" fill="#30363d" opacity="0.55"/>
+              </pattern>
+            </defs>
+
+            <!-- All content in a single group for zoom/pan via JS transform -->
+            <g id="map-viewport">
+
+              <!-- Extended background so panning never reveals bare edges -->
+              <rect x="-4000" y="-4000" width="9600" height="8920" fill="url(#dot-grid)"/>
+
+              <!-- Column headers -->
+              <text class="col-label" x="100" y="28" text-anchor="middle">Input</text>
+              <text class="col-label" x="390" y="28" text-anchor="middle">Application</text>
+              <text class="col-label" x="660" y="28" text-anchor="middle">Services</text>
+
+              <!-- Faint column dividers -->
+              <line x1="240" y1="38" x2="240" y2="450" stroke="#30363d" stroke-width="1" opacity="0.4"/>
+              <line x1="520" y1="38" x2="520" y2="450" stroke="#30363d" stroke-width="1" opacity="0.4"/>
+
+              <!-- EDGES -->
+              <g id="map-edges">
+                <g class="map-edge" id="map-edge-user-app">
+                  <path class="edge-base" d="M 170,230 L 320,230"/>
+                  <path class="edge-flow" d="M 170,230 L 320,230"/>
+                </g>
+                <g class="map-edge" id="map-edge-app-db">
+                  <path class="edge-base" d="M 460,230 C 530,230 530,90 590,90"/>
+                  <path class="edge-flow" d="M 460,230 C 530,230 530,90 590,90"/>
+                </g>
+                <g class="map-edge" id="map-edge-app-email">
+                  <path class="edge-base" d="M 460,230 C 530,230 530,190 590,190"/>
+                  <path class="edge-flow" d="M 460,230 C 530,230 530,190 590,190"/>
+                </g>
+                <g class="map-edge" id="map-edge-app-http">
+                  <path class="edge-base" d="M 460,230 C 530,230 530,290 590,290"/>
+                  <path class="edge-flow" d="M 460,230 C 530,230 530,290 590,290"/>
+                </g>
+                <g class="map-edge" id="map-edge-app-rng">
+                  <path class="edge-base" d="M 460,230 C 530,230 530,390 590,390"/>
+                  <path class="edge-flow" d="M 460,230 C 530,230 530,390 590,390"/>
+                </g>
+              </g>
+
+              <!-- NODES -->
+              <g id="map-nodes">
+                <g class="map-node" id="map-node-user">
+                  <rect class="node-bg" x="30"  y="206" width="140" height="48" rx="7"/>
+                  <text class="node-label" x="100" y="226">User</text>
+                  <text class="node-sub"   x="100" y="243">actor</text>
+                </g>
+                <g class="map-node" id="map-node-app">
+                  <rect class="node-bg" x="320" y="206" width="140" height="48" rx="7"/>
+                  <text class="node-label" x="390" y="226">Flask App</text>
+                  <text class="node-sub"   x="390" y="243">app</text>
+                </g>
+                <g class="map-node" id="map-node-db">
+                  <rect class="node-bg" x="590" y="66"  width="140" height="48" rx="7"/>
+                  <text class="node-label" x="660" y="86">Database</text>
+                  <text class="node-sub"   x="660" y="103">db</text>
+                </g>
+                <g class="map-node" id="map-node-email">
+                  <rect class="node-bg" x="590" y="166" width="140" height="48" rx="7"/>
+                  <text class="node-label" x="660" y="186">Email Service</text>
+                  <text class="node-sub"   x="660" y="203">email</text>
+                </g>
+                <g class="map-node" id="map-node-http">
+                  <rect class="node-bg" x="590" y="266" width="140" height="48" rx="7"/>
+                  <text class="node-label" x="660" y="286">External API</text>
+                  <text class="node-sub"   x="660" y="303">http</text>
+                </g>
+                <g class="map-node" id="map-node-rng">
+                  <rect class="node-bg" x="590" y="366" width="140" height="48" rx="7"/>
+                  <text class="node-label" x="660" y="386">RNG / Compute</text>
+                  <text class="node-sub"   x="660" y="403">app · compute</text>
+                </g>
+              </g>
+
+            </g><!-- /#map-viewport -->
+
+          </svg>
+        </div><!-- /.map-canvas-wrap -->
+
+      </div><!-- /#pane-map -->
+
+    </main><!-- /#main-pane -->
+
+    <!-- Drag handle (right) -->
+    <div id="drag-handle-right"></div>
+
+    <!-- ================================================================
+         Detail pane — trace inspector (always visible, right column)
+         ================================================================ -->
+    <aside id="detail-pane">
+      <div class="detail-pane-header">
+        <div class="detail-pane-title">Trace Inspector</div>
+        <div id="map-label" class="detail-pane-trace-label">
+          Fire an action or click a trace row.
+        </div>
+      </div>
+      <div id="map-details" class="map-details">
+        <div class="map-details-empty">
+          Select a trace or fire an action.
+        </div>
+      </div>
+    </aside>
+
+  </div><!-- /.app-body -->
+
+  <script src="app.js"></script>
+</body>
+</html>
