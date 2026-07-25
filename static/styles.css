@@ -583,7 +583,7 @@ header {
   padding: 14px;
   font-family: var(--mono);
   font-size: 11.5px;
-  max-height: 320px;
+  max-height: 200px;
   overflow: auto;
   color: var(--text-dim);
   white-space: pre;
