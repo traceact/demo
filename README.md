@@ -1,13 +1,15 @@
 # TraceAct Demo
 
-A Flask-based demo app for [TraceAct](https://github.com/traceact/traceact) — fire actions, watch traces appear in real time, and explore the system graph in the TraceMap.
+A Flask-based demo app for [TraceAct](https://github.com/traceact/traceact) — fire actions, watch traces appear in real time, and explore what gets recorded across four live sinks.
 
 ## Features
 
 - 10 fireable actions covering auth, messaging, email campaigns, report export, webhook dispatch, and bulk import
-- TraceLog: tabular view of every trace with status, duration, steps, events, and errors
-- TraceMap: interactive SVG graph showing which system components each action touched (zoom, pan, infinite canvas)
-- Trace Inspector: right-hand panel with per-trace breakdown (steps, events, touches, errors)
+- **Traces tab**: tabular view of every trace with status, duration, steps, events, and errors
+- **Map tab**: inline SVG trace visualizer showing actor → action → touched resources with colour-coded bezier connections
+- **Explore tab**: live sink stats (JSONL, SQLite, HTTP, OTLP) plus a TraceLog query builder with Python snippet preview
+- Trace Inspector: right-hand panel with per-trace breakdown (steps, events, touches, errors) and "View map →" shortcut
+- Four parallel sinks: `JsonlSink`, `SqliteSink`, `AsyncSink(HttpSink)`, `AsyncSink(OtlpSink)` — all pointing at local echo endpoints
 - Live action search and drag-to-resize columns
 
 ## Getting started

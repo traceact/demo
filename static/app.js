@@ -1,47 +1,33 @@
-// app.js — TraceAct Demo frontend
+// app.js — TraceAct Demo
 //
-// Two views:
-//   TraceLog — scrollable table of all trace records (original view)
-//   TraceMap — SVG graph that lights up nodes/edges when a trace fires
+// Two main tabs:
+//   Traces  — live table of all trace records + row-click inspector
+//   Explore — sinks dashboard (JSONL/SQLite/HTTP/OTLP) + TraceLog query builder
 //
-// Core data flow:
-//   1. User clicks "Run" → fire() POSTs to a Flask route
-//   2. After AUTO_REFRESH_DELAY_MS, loadTraces() fetches /api/traces
-//   3. renderTable() rebuilds the TraceLog table
-//   4. selectTrace() sets selectedTrace and, if on TraceMap tab,
-//      calls animateTrace() + renderTraceDetails()
-//
-// TraceMap graph topology (fixed nodes, driven by trace data):
-//   [User] ──► [Flask App] ──► [Database]
-//                  │         └─► [Email Service]
-//                  │         └─► [External API]
-//                  └─────────└─► [RNG / Compute]
-//
-// Which nodes/edges light up is determined by inspecting the trace's
-// events list — kind="db" → Database node, kind="email" → Email Service, etc.
+// Data flow:
+//   User clicks "Run" → fire() → loadTraces() → renderTable()
+//   Row click → selectTrace() → renderTraceDetails() (inspector pane)
+//   Explore tab open → refreshSinkStats() on 2s interval
 
 // ---------------------------------------------------------------------------
-// Constants & state
+// Constants & global state
 // ---------------------------------------------------------------------------
 
 const AUTO_REFRESH_DELAY_MS = 300;
 
-// All SVG node IDs in the graph, in animation order (left → right)
-const ALL_NODES = ['user', 'app', 'db', 'email', 'http', 'rng'];
-const ALL_EDGES = ['user-app', 'app-db', 'app-email', 'app-http', 'app-rng'];
+let allTraces       = [];      // full array from /api/traces (newest first)
+let selectedTrace   = null;    // trace currently shown in inspector
+let expandedTraceId = null;    // trace row with JSON expanded
+let currentTab      = 'traces';
 
-// The trace currently shown in TraceMap and highlighted in TraceLog
-let selectedTrace = null;
+let sinkStatsInterval = null;  // setInterval handle for Explore tab refresh
+let otlpPayloadVisible = false;
+let lastOtlpLog = [];          // latest /api/sink/otlp-log result
 
-// The trace row currently expanded (JSON view) in TraceLog
-let expandedTraceId = null;
-
-// Which tab is active: 'log' | 'map'
-let currentTab = 'log';
-
-// setTimeout handles for the current animation sequence — kept so we can
-// cancel a running animation if a new trace fires before the old one finishes
-let animTimers = [];
+// Query builder state
+let queryFilters        = [];
+let queryFilterIdSeq    = 0;
+let queryHasRun         = false;
 
 // ---------------------------------------------------------------------------
 // Tab switching
@@ -50,23 +36,30 @@ let animTimers = [];
 function switchTab(tab) {
   currentTab = tab;
 
-  document.getElementById('pane-log').classList.toggle('active', tab === 'log');
-  document.getElementById('pane-map').classList.toggle('active', tab === 'map');
-  document.getElementById('tab-log').classList.toggle('active', tab === 'log');
-  document.getElementById('tab-map').classList.toggle('active', tab === 'map');
+  document.getElementById('pane-traces').classList.toggle('active',  tab === 'traces');
+  document.getElementById('pane-explore').classList.toggle('active', tab === 'explore');
+  document.getElementById('pane-map').classList.toggle('active',     tab === 'map');
+  document.getElementById('tab-traces').classList.toggle('active',   tab === 'traces');
+  document.getElementById('tab-explore').classList.toggle('active',  tab === 'explore');
+  document.getElementById('tab-map').classList.toggle('active',      tab === 'map');
 
-  // When the user navigates to TraceMap, immediately render the selected trace
-  // (if any). This handles the case where the user fires actions on TraceLog
-  // and then switches over to see the map.
-  if (tab === 'map' && selectedTrace) {
-    animateTrace(selectedTrace);
-    renderTraceDetails(selectedTrace);
-    updateMapLabel(selectedTrace);
+  if (tab === 'explore') {
+    refreshSinkStats();
+    if (!sinkStatsInterval) {
+      sinkStatsInterval = setInterval(refreshSinkStats, 2000);
+    }
+  } else {
+    if (sinkStatsInterval) {
+      clearInterval(sinkStatsInterval);
+      sinkStatsInterval = null;
+    }
   }
+
+  if (tab === 'map') renderTraceMap(selectedTrace);
 }
 
 // ---------------------------------------------------------------------------
-// Action calls — POST to Flask, then refresh
+// Action functions — POST to Flask, then refresh
 // ---------------------------------------------------------------------------
 
 async function createNote() {
@@ -119,11 +112,12 @@ async function clearTraces() {
   setStatus('Clearing traces…');
   try {
     await fetch('/api/traces/clear', { method: 'POST' });
+    allTraces       = [];
     selectedTrace   = null;
     expandedTraceId = null;
-    resetMap();
-    updateMapLabel(null);
     renderTraceDetails(null);
+    updateMapLabel(null);
+    renderTraceMap(null);
     await loadTraces();
     setStatus('Traces cleared.');
   } catch (err) {
@@ -131,7 +125,6 @@ async function clearTraces() {
   }
 }
 
-// fire() — shared wrapper: POST → wait → loadTraces → selectTrace(newest)
 async function fire(endpoint, body, label) {
   setStatus(`Running ${label}…`);
   try {
@@ -141,83 +134,88 @@ async function fire(endpoint, body, label) {
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    // Blocking mode means the trace is already on disk before the response
-    // returns. We still wait a short moment so Flask finishes writing.
     setTimeout(async () => {
-      await loadTraces();          // rebuilds TraceLog table
+      await loadTraces();
       setStatus(`${label} — trace recorded.`);
     }, AUTO_REFRESH_DELAY_MS);
-
   } catch (err) {
     setStatus(`Error calling ${label}: ${err.message}`);
   }
 }
 
 // ---------------------------------------------------------------------------
-// loadTraces() — fetch all records from /api/traces, render TraceLog,
-//                auto-select the newest trace for TraceMap
+// loadTraces — fetch, store, render
 // ---------------------------------------------------------------------------
 
 async function loadTraces() {
   try {
     const res = await fetch('/api/traces');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const traces = await res.json();
+    allTraces = await res.json();
 
-    renderTable(traces);
+    const query = document.getElementById('trace-search')?.value || '';
+    renderTable(filterBySearch(allTraces, query));
 
-    // Auto-select the most recent trace so TraceMap is always showing
-    // something useful after each action fires.
-    if (traces.length > 0) {
-      selectTrace(traces[0]); // traces are newest-first from /api/traces
+    if (allTraces.length > 0) {
+      selectTrace(allTraces[0]);
     }
   } catch (err) {
     setStatus(`Could not load traces: ${err.message}`);
   }
 }
 
+// filterBySearch — client-side substring filter across action/kind/status
+function filterBySearch(traces, query) {
+  if (!query.trim()) return traces;
+  const q = query.trim().toLowerCase();
+  return traces.filter(t =>
+    (t.action  || '').toLowerCase().includes(q) ||
+    (t.kind    || '').toLowerCase().includes(q) ||
+    (t.status  || '').toLowerCase().includes(q)
+  );
+}
+
+function filterTable(query) {
+  renderTable(filterBySearch(allTraces, query));
+}
+
 // ---------------------------------------------------------------------------
-// selectTrace() — designate a trace as the "selected" one for TraceMap.
-//                 Called both on row click (TraceLog) and after loadTraces().
+// selectTrace — designate the "active" trace for the inspector
 // ---------------------------------------------------------------------------
 
 function selectTrace(trace) {
   selectedTrace = trace;
   updateMapLabel(trace);
-
-  if (currentTab === 'map') {
-    animateTrace(trace);
-    renderTraceDetails(trace);
-  } else {
-    // Pre-render the details so switching to TraceMap is instant
-    renderTraceDetails(trace);
-  }
+  renderTraceDetails(trace);
+  if (currentTab === 'map') renderTraceMap(trace);
 }
 
 // ---------------------------------------------------------------------------
-// renderTable() — builds the TraceLog HTML from an array of trace records
+// renderTable — build TraceLog HTML
 // ---------------------------------------------------------------------------
 
 function renderTable(traces) {
   const container = document.getElementById('trace-container');
 
   if (!traces || traces.length === 0) {
-    container.innerHTML = `<div class="empty-state">No traces yet. Fire an action above.</div>`;
+    container.innerHTML = `<div class="empty-state">No traces yet — fire an action to get started.</div>`;
     return;
   }
 
   let html = `
     <table class="trace-table">
       <colgroup>
-        <col style="width:110px"><col style="width:170px"><col style="width:80px">
-        <col style="width:105px"><col style="width:115px"><col style="width:170px">
-        <col style="width:70px"><col style="width:60px"><col style="width:90px">
+        <col style="width:100px"><col style="width:160px"><col style="width:90px">
+        <col style="width:110px"><col style="width:100px"><col style="width:60px"><col style="width:55px">
       </colgroup>
       <thead><tr>
-        <th>Time</th><th>Action</th><th>Kind</th><th>Status</th>
-        <th class="num">Duration (ms)</th><th>Trace ID</th>
-        <th class="num">Touches</th><th class="num">Errors</th><th>Budget hit</th>
+        <th>Time</th>
+        <th>Action</th>
+        <th>Kind</th>
+        <th>Status</th>
+        <th class="num">Duration (ms)</th>
+        <th class="num">Touches</th>
+        <th class="num">Errors</th>
       </tr></thead>
       <tbody>
   `;
@@ -225,41 +223,33 @@ function renderTable(traces) {
   for (const t of traces) {
     const isExpanded = (t.trace_id === expandedTraceId);
     const isSelected = (t.trace_id === selectedTrace?.trace_id);
-
     const touches    = t.touches || [];
     const errors     = t.errors  || [];
-    const touchTip   = touches.map(x => `${x.kind}: ${x.target}`).join('\n') || 'none';
     const dur        = t.duration_ms != null ? t.duration_ms.toFixed(1) : '—';
-    const budgeBadge = t.budget_hit
-      ? `<span class="badge badge-warn">yes</span>`
-      : `<span class="badge badge-muted">no</span>`;
-    const shortId = t.trace_id ? t.trace_id.slice(0, 16) + '…' : '—';
+    const kindCls    = `badge badge-${escapeHtml(t.kind || 'app')}`;
 
     const rowCls = [
       'trace-row',
-      isExpanded ? 'expanded' : '',
-      t.status === 'failed'  ? 'row-failed'   : '',
-      isSelected             ? 'row-selected' : '',
+      isExpanded ? 'expanded'     : '',
+      t.status === 'failed' ? 'row-failed'   : '',
+      isSelected            ? 'row-selected' : '',
     ].filter(Boolean).join(' ');
 
     html += `
-      <tr class="${rowCls}" data-trace-id="${escapeAttr(t.trace_id)}"
-          onclick="onRowClick('${escapeAttr(t.trace_id)}', event)">
-        <td class="mono">${formatTime(t.started_at)}</td>
+      <tr class="${rowCls}" onclick="onRowClick('${escapeAttr(t.trace_id)}', event)">
+        <td class="mono dim">${formatTime(t.started_at)}</td>
         <td class="mono bold">${escapeHtml(t.action || '—')}</td>
-        <td><span class="kind-tag">${escapeHtml(t.kind || '—')}</span></td>
+        <td><span class="${kindCls}">${escapeHtml(t.kind || '—')}</span></td>
         <td>${makeStatusBadge(t.status)}</td>
         <td class="num mono">${dur}</td>
-        <td class="mono dim" title="${escapeAttr(t.trace_id || '')}">${shortId}</td>
-        <td class="num mono" title="${escapeAttr(touchTip)}">${touches.length}</td>
+        <td class="num mono">${touches.length}</td>
         <td class="num mono ${errors.length > 0 ? 'err' : ''}">${errors.length}</td>
-        <td>${budgeBadge}</td>
       </tr>
     `;
 
     if (isExpanded) {
       html += `
-        <tr class="detail-row"><td colspan="9">
+        <tr class="detail-row"><td colspan="7">
           <div class="detail-inner">
             <pre class="json-view">${syntaxHighlight(t)}</pre>
           </div>
@@ -272,204 +262,21 @@ function renderTable(traces) {
   container.innerHTML = html;
 }
 
-// onRowClick — clicking a row does two things:
-//   1. Toggles the inline JSON expansion (TraceLog behaviour)
-//   2. Selects that trace for TraceMap
 function onRowClick(traceId, event) {
-  // Toggle JSON expand
   expandedTraceId = (expandedTraceId === traceId) ? null : traceId;
-
-  // Find the full trace object from the current table to pass to selectTrace
-  const row = event.currentTarget;
-  if (!row) { loadTraces(); return; }
-
-  // Re-render table immediately (shows/hides JSON, updates selected highlight)
-  // Then selectTrace to update the map. We need the trace object, so we fetch.
   fetch('/api/traces')
     .then(r => r.json())
     .then(traces => {
-      renderTable(traces);
+      allTraces = traces;
+      const query = document.getElementById('trace-search')?.value || '';
+      renderTable(filterBySearch(traces, query));
       const t = traces.find(x => x.trace_id === traceId);
       if (t) selectTrace(t);
     });
 }
 
 // ---------------------------------------------------------------------------
-// TraceMap — SVG animation
-// ---------------------------------------------------------------------------
-
-// traceToGraph() — reads a trace record and returns which nodes/edges are active,
-//                  plus the ordered sequence in which to animate them.
-//
-// Mapping rules:
-//   actor="user"          → user node + user-app edge
-//   app layer             → app node (always present)
-//   events[].kind="db"    → db node + app-db edge
-//   events[].kind="email" → email node + app-email edge
-//   events[].kind="http"  → http node + app-http edge
-//   events[].kind="app" && target="rng" → rng node + app-rng edge
-//
-// The sequence preserves the order events appear in the trace, so the
-// animation visually matches what actually happened.
-
-function traceToGraph(trace) {
-  const activeNodes = new Set();
-  const activeEdges = new Set();
-
-  // Always include the app (the Flask layer) — every trace goes through it.
-  activeNodes.add('app');
-
-  // Actor → user node
-  if (trace.actor === 'user') {
-    activeNodes.add('user');
-    activeEdges.add('user-app');
-  }
-
-  // Walk events in order to derive service nodes and edges.
-  // We deduplicate (a trace may have multiple db events — the node lights up once).
-  const seen = new Set();
-  for (const evt of (trace.events || [])) {
-    if (evt.kind === 'db' && !seen.has('db')) {
-      seen.add('db');
-      activeNodes.add('db');
-      activeEdges.add('app-db');
-    } else if (evt.kind === 'email' && !seen.has('email')) {
-      seen.add('email');
-      activeNodes.add('email');
-      activeEdges.add('app-email');
-    } else if (evt.kind === 'http' && !seen.has('http')) {
-      seen.add('http');
-      activeNodes.add('http');
-      activeEdges.add('app-http');
-    } else if (evt.kind === 'app' && evt.target === 'rng' && !seen.has('rng')) {
-      seen.add('rng');
-      activeNodes.add('rng');
-      activeEdges.add('app-rng');
-    }
-  }
-
-  // Build an animation sequence: ordered list of {type, id, t} objects.
-  // t is the delay in ms from the start of the animation.
-  const sequence = [];
-  let t = 0;
-
-  if (activeNodes.has('user')) {
-    sequence.push({ type: 'node', id: 'user',     t });   t += 180;
-    sequence.push({ type: 'edge', id: 'user-app', t });   t += 220;
-  }
-
-  sequence.push({ type: 'node', id: 'app', t }); t += 220;
-
-  // Service edges and nodes, in the order they were seen in the events list.
-  const serviceOrder = ['db', 'email', 'http', 'rng'];
-  const edgeMap = { db: 'app-db', email: 'app-email', http: 'app-http', rng: 'app-rng' };
-
-  for (const svc of serviceOrder) {
-    if (activeNodes.has(svc)) {
-      sequence.push({ type: 'edge', id: edgeMap[svc], t }); t += 160;
-      sequence.push({ type: 'node', id: svc,          t }); t += 100;
-    }
-  }
-
-  return { activeNodes, activeEdges, sequence };
-}
-
-// animateTrace() — main entry point for the TraceMap animation.
-//
-// Steps:
-//   1. Cancel any in-progress animation timers
-//   2. Reset all node/edge classes to default
-//   3. Mark inactive elements (not in this trace) as dimmed
-//   4. Schedule the activation of each element according to the sequence
-//   5. Also animate the step labels in the details panel in sync
-
-function animateTrace(trace) {
-  if (!trace) { resetMap(); return; }
-
-  // Cancel leftover timers from a previous animation
-  animTimers.forEach(clearTimeout);
-  animTimers = [];
-
-  const { activeNodes, activeEdges, sequence } = traceToGraph(trace);
-  const isError = (trace.status === 'failed');
-  const cls     = isError ? 'error' : 'active';
-
-  // Reset all elements to their neutral (non-highlighted) state
-  resetMap();
-
-  // Dim elements not involved in this trace so the active path stands out
-  ALL_NODES.forEach(id => {
-    if (!activeNodes.has(id))
-      document.getElementById(`map-node-${id}`)?.classList.add('inactive');
-  });
-  ALL_EDGES.forEach(id => {
-    if (!activeEdges.has(id))
-      document.getElementById(`map-edge-${id}`)?.classList.add('inactive');
-  });
-
-  // Schedule each element's activation according to the sequence
-  for (const { type, id, t } of sequence) {
-    const timer = setTimeout(() => {
-      const el = document.getElementById(`map-${type}-${id}`);
-      if (el) el.classList.add(cls);
-    }, t);
-    animTimers.push(timer);
-  }
-
-  // Animate step labels in the detail panel in sync with the graph.
-  // Steps start appearing slightly after the app node activates.
-  const appActivateAt = sequence.find(s => s.type === 'node' && s.id === 'app')?.t ?? 0;
-  animateStepLabels(trace.steps || [], appActivateAt + 150);
-}
-
-// animateStepLabels() — highlights step items in the detail panel one by one,
-//                        timed to match when nodes are lighting up on the graph.
-
-function animateStepLabels(steps, baseDelay) {
-  const STEP_INTERVAL = 220; // ms between each step lighting up
-
-  // Mark all steps as pending first
-  document.querySelectorAll('.step-item').forEach(el => {
-    el.classList.remove('step-done', 'step-active', 'step-pending');
-    el.classList.add('step-pending');
-  });
-
-  steps.forEach((_, i) => {
-    // Mark step i as "active" (currently running)
-    const activateTimer = setTimeout(() => {
-      document.querySelectorAll('.step-item').forEach((el, j) => {
-        el.classList.remove('step-done', 'step-active', 'step-pending');
-        if (j < i)      el.classList.add('step-done');
-        else if (j === i) el.classList.add('step-active');
-        else              el.classList.add('step-pending');
-      });
-    }, baseDelay + i * STEP_INTERVAL);
-
-    animTimers.push(activateTimer);
-
-    // After the last step, mark everything done
-    if (i === steps.length - 1) {
-      const doneTimer = setTimeout(() => {
-        document.querySelectorAll('.step-item').forEach(el => {
-          el.classList.remove('step-done', 'step-active', 'step-pending');
-          el.classList.add('step-done');
-        });
-      }, baseDelay + (i + 1) * STEP_INTERVAL);
-      animTimers.push(doneTimer);
-    }
-  });
-}
-
-// resetMap() — remove all state classes, returning every node/edge to neutral
-function resetMap() {
-  document.querySelectorAll('.map-node, .map-edge').forEach(el => {
-    el.classList.remove('active', 'error', 'inactive');
-  });
-}
-
-// ---------------------------------------------------------------------------
-// renderTraceDetails() — populates the panel below the SVG with steps,
-//                         events, touches, and errors from the selected trace
+// Inspector panel — renderTraceDetails + updateMapLabel
 // ---------------------------------------------------------------------------
 
 function renderTraceDetails(trace) {
@@ -477,7 +284,7 @@ function renderTraceDetails(trace) {
   if (!container) return;
 
   if (!trace) {
-    container.innerHTML = `<div class="map-details-empty">Select a trace from TraceLog or fire an action.</div>`;
+    container.innerHTML = `<div class="map-details-empty">Select a trace from the log or fire an action.</div>`;
     return;
   }
 
@@ -486,22 +293,17 @@ function renderTraceDetails(trace) {
   const touches = trace.touches || [];
   const errors  = trace.errors  || [];
 
-  // Steps column — each item starts as pending; animateStepLabels() drives
-  // the done/active state transitions during the animation.
   const stepsHtml = steps.length === 0
     ? `<div class="detail-none">no steps recorded</div>`
     : steps.map((s, i) => `
-        <div class="step-item step-pending" data-step-index="${i}">
+        <div class="step-item step-done" data-step-index="${i}">
           <span class="step-check"></span>
           <span class="step-label">${escapeHtml(s.label)}</span>
         </div>`).join('');
 
-  // Events column — shows kind / operation → target, plus any extra fields
   const eventsHtml = events.length === 0
     ? `<div class="detail-none">no events recorded</div>`
     : events.map(e => {
-        // Collect interesting extra fields (rows, status_code, etc.) beyond
-        // the standard set that are already shown inline.
         const stdFields = new Set(['event_id','parent_event_id','kind','action',
           'operation','target','status','started_at','ended_at','duration_ms',
           'result','error','depth']);
@@ -509,7 +311,6 @@ function renderTraceDetails(trace) {
           .filter(([k]) => !stdFields.has(k))
           .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
           .join(' · ');
-
         return `
           <div class="event-item">
             <span class="ev-kind">${escapeHtml(e.kind || '—')}</span>
@@ -519,7 +320,6 @@ function renderTraceDetails(trace) {
           </div>`;
       }).join('');
 
-  // Touches column
   const touchesHtml = touches.length === 0
     ? `<div class="detail-none">no touches recorded</div>`
     : touches.map(t => `
@@ -528,7 +328,6 @@ function renderTraceDetails(trace) {
           <span class="touch-target">${escapeHtml(t.target)}</span>
         </div>`).join('');
 
-  // Errors column
   const errorsHtml = errors.length === 0
     ? `<div class="detail-none">none</div>`
     : errors.map(e => `
@@ -540,11 +339,6 @@ function renderTraceDetails(trace) {
   const dur = trace.duration_ms != null ? `${trace.duration_ms.toFixed(1)} ms` : '—';
 
   container.innerHTML = `
-    <div class="detail-header">
-      <span class="detail-action">${escapeHtml(trace.action || '—')}</span>
-      ${makeStatusBadge(trace.status)}
-      <span class="detail-dur">${dur}</span>
-    </div>
     <div class="detail-columns">
       <div class="detail-col">
         <div class="detail-col-title">Steps (${steps.length})</div>
@@ -566,22 +360,505 @@ function renderTraceDetails(trace) {
   `;
 }
 
-// updateMapLabel() — updates the detail pane header with the selected trace
 function updateMapLabel(trace) {
   const el = document.getElementById('map-label');
   if (!el) return;
-
   if (!trace) {
     el.textContent = 'Fire an action or click a trace row.';
     return;
   }
-
   const dur = trace.duration_ms != null ? `${trace.duration_ms.toFixed(1)} ms` : '—';
   el.innerHTML = `
-    <span style="font-weight:700;color:var(--text);font-family:var(--mono)">${escapeHtml(trace.action)}</span>
-    ${makeStatusBadge(trace.status)}
-    <span style="color:var(--muted)">${dur}</span>
+    <div class="map-label-summary">
+      <span style="font-weight:700;color:var(--text)">${escapeHtml(trace.action)}</span>
+      ${makeStatusBadge(trace.status)}
+      <span style="color:var(--text-dim)">${dur}</span>
+    </div>
+    <button class="btn btn-xs view-map-btn" onclick="switchTab('map')">View map →</button>
   `;
+}
+
+// ---------------------------------------------------------------------------
+// Open in viewer (Traces tab — no filters)
+// ---------------------------------------------------------------------------
+
+async function openInViewer() {
+  try {
+    const res = await fetch('/api/tracelog/view', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filters: {} }),
+    });
+    const { url } = await res.json();
+    window.open(url, '_blank', 'noopener');
+  } catch (err) {
+    setStatus(`Could not open viewer: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Map tab — trace visualizer
+// ---------------------------------------------------------------------------
+
+function renderTraceMap(trace) {
+  const container = document.getElementById('map-canvas');
+  if (!container) return;
+
+  const labelEl = document.getElementById('map-pane-label');
+
+  if (!trace) {
+    container.innerHTML = `<div class="map-empty">Select a trace from the Traces tab and click "View map →" to visualize it here.</div>`;
+    if (labelEl) labelEl.textContent = 'Select a trace to view its map.';
+    return;
+  }
+
+  if (labelEl) {
+    const dur = trace.duration_ms != null ? `${trace.duration_ms.toFixed(1)} ms` : '—';
+    labelEl.innerHTML = `<strong style="color:var(--text)">${escapeHtml(trace.action)}</strong>${makeStatusBadge(trace.status)}<span style="color:var(--text-faint)">${dur}</span>`;
+  }
+
+  const steps   = trace.steps   || [];
+  const touches = trace.touches || [];
+  const actor   = trace.actor   || null;
+
+  // Layout constants
+  const W         = Math.max(container.clientWidth, 500);
+  const ACTOR_R   = 30;
+  const BOX_W     = 210;
+  const BOX_PAD_T = 36;
+  const BOX_PAD_B = 16;
+  const STEP_H    = 22;
+  const RES_H     = 44;
+  const RES_GAP   = 12;
+
+  const BOX_H = BOX_PAD_T + Math.max(steps.length, 1) * STEP_H + BOX_PAD_B;
+  const totalResH = touches.length > 0
+    ? touches.length * RES_H + (touches.length - 1) * RES_GAP : 0;
+
+  const contentH = Math.max(BOX_H, totalResH, 80);
+  const H        = contentH + 80;
+  const midY     = H / 2;
+
+  const hasActor  = !!actor;
+  const actorCX   = hasActor ? 44 : 0;
+  const BOX_LEFT  = hasActor ? actorCX + ACTOR_R + 60 : 50;
+  const BOX_RIGHT = BOX_LEFT + BOX_W;
+  const RES_LEFT  = BOX_RIGHT + 110;
+  const RES_W     = Math.max(100, Math.min(180, W - RES_LEFT - 20));
+
+  const boxTop    = midY - BOX_H / 2;
+  const resStartY = midY - totalResH / 2;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" width="100%" height="${H}" style="display:block">`;
+
+  svg += `<defs>
+    <marker id="ta-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+      <polygon points="0 0, 7 3.5, 0 7" fill="var(--border-strong)" />
+    </marker>
+  </defs>`;
+
+  // Actor
+  if (hasActor) {
+    svg += `
+      <circle cx="${actorCX}" cy="${midY}" r="${ACTOR_R}"
+              fill="var(--bg-card)" stroke="var(--border-strong)" stroke-width="1.5" />
+      <text x="${actorCX}" y="${midY - 7}" text-anchor="middle" dominant-baseline="middle"
+            font-size="8.5" font-weight="600" fill="var(--text-faint)" font-family="var(--mono)">ACTOR</text>
+      <text x="${actorCX}" y="${midY + 8}" text-anchor="middle" dominant-baseline="middle"
+            font-size="10.5" fill="var(--text-dim)" font-family="var(--mono)">${escapeHtml(truncateStr(actor, 8))}</text>
+      <line x1="${actorCX + ACTOR_R}" y1="${midY}" x2="${BOX_LEFT - 4}" y2="${midY}"
+            stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#ta-arrow)" />
+    `;
+  }
+
+  // Action box
+  const boxKindColor = kindCssVar(trace.kind);
+  const statusColor  = trace.status === 'completed' ? 'var(--status-completed)'
+                     : trace.status === 'failed'    ? 'var(--status-failed)'
+                     : 'var(--text-faint)';
+
+  svg += `
+    <rect x="${BOX_LEFT}" y="${boxTop}" width="${BOX_W}" height="${BOX_H}" rx="7"
+          fill="var(--bg-card)" stroke="${boxKindColor}" stroke-width="1.5" />
+    <text x="${BOX_LEFT + 12}" y="${boxTop + 19}" dominant-baseline="middle"
+          font-size="12.5" font-weight="700" fill="var(--text)" font-family="var(--mono)">${escapeHtml(truncateStr(trace.action, 18))}</text>
+    <rect x="${BOX_RIGHT - 68}" y="${boxTop + 6}" width="60" height="16" rx="4"
+          fill="transparent" stroke="${statusColor}" stroke-width="1" opacity="0.7" />
+    <text x="${BOX_RIGHT - 38}" y="${boxTop + 14}" text-anchor="middle" dominant-baseline="middle"
+          font-size="9" fill="${statusColor}" font-family="var(--mono)">${escapeHtml(trace.status || '?')}</text>
+    <line x1="${BOX_LEFT + 8}" y1="${boxTop + 30}" x2="${BOX_RIGHT - 8}" y2="${boxTop + 30}"
+          stroke="var(--border)" stroke-width="1" />
+  `;
+
+  // Steps
+  if (steps.length === 0) {
+    svg += `<text x="${BOX_LEFT + 14}" y="${boxTop + BOX_PAD_T + STEP_H / 2}" dominant-baseline="middle"
+          font-size="10.5" fill="var(--text-faint)" font-family="var(--mono)">no steps recorded</text>`;
+  }
+  steps.forEach((s, i) => {
+    const sy = boxTop + BOX_PAD_T + i * STEP_H + STEP_H / 2;
+    svg += `
+      <text x="${BOX_LEFT + 14}" y="${sy}" dominant-baseline="middle"
+            font-size="10" fill="var(--accent)" font-family="var(--mono)">✓</text>
+      <text x="${BOX_LEFT + 28}" y="${sy}" dominant-baseline="middle"
+            font-size="10.5" fill="var(--text-dim)" font-family="var(--mono)">${escapeHtml(truncateStr(s.label, 22))}</text>
+    `;
+  });
+
+  // Resource nodes + bezier lines
+  const M = touches.length;
+  touches.forEach((touch, i) => {
+    const ry    = resStartY + i * (RES_H + RES_GAP);
+    const rmidY = ry + RES_H / 2;
+    const exitY = M === 1 ? midY : boxTop + 15 + (BOX_H - 30) * i / (M - 1);
+    const midX  = BOX_RIGHT + (RES_LEFT - BOX_RIGHT) * 0.5;
+
+    svg += `
+      <path d="M ${BOX_RIGHT} ${exitY} C ${midX} ${exitY} ${midX} ${rmidY} ${RES_LEFT - 4} ${rmidY}"
+            fill="none" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#ta-arrow)" />
+    `;
+
+    const tkindCol = kindCssVar(touch.kind);
+    svg += `
+      <rect x="${RES_LEFT}" y="${ry}" width="${RES_W}" height="${RES_H}" rx="6"
+            fill="var(--bg-card)" stroke="${tkindCol}" stroke-width="1.5" />
+      <text x="${RES_LEFT + 10}" y="${ry + 14}" dominant-baseline="middle"
+            font-size="9" font-weight="700" fill="${tkindCol}" font-family="var(--mono)">${escapeHtml((touch.kind || '').toUpperCase())}</text>
+      <text x="${RES_LEFT + 10}" y="${ry + 30}" dominant-baseline="middle"
+            font-size="11.5" fill="var(--text)" font-family="var(--mono)">${escapeHtml(truncateStr(touch.target || '—', 20))}</text>
+    `;
+  });
+
+  if (M === 0) {
+    svg += `<text x="${RES_LEFT}" y="${midY}" dominant-baseline="middle"
+          font-size="11" fill="var(--text-faint)" font-family="var(--mono)">no resources touched</text>`;
+  }
+
+  svg += `</svg>`;
+  container.innerHTML = svg;
+}
+
+function kindCssVar(kind) {
+  const map = {
+    app: 'var(--kind-app)', db: 'var(--kind-db)', db_table: 'var(--kind-db)',
+    http: 'var(--kind-http)', http_endpoint: 'var(--kind-http)',
+    model: 'var(--kind-model)', job: 'var(--kind-job)',
+    email: 'var(--kind-email)', email_service: 'var(--kind-email)',
+  };
+  return map[kind] || 'var(--border-strong)';
+}
+
+function truncateStr(str, n) {
+  if (!str) return '';
+  return str.length > n ? str.slice(0, n - 1) + '…' : str;
+}
+
+// ---------------------------------------------------------------------------
+// Explore tab — sink stats dashboard
+// ---------------------------------------------------------------------------
+
+async function refreshSinkStats() {
+  try {
+    const [statsRes, otlpRes] = await Promise.all([
+      fetch('/api/sink-stats'),
+      fetch('/api/sink/otlp-log'),
+    ]);
+    const stats = await statsRes.json();
+    lastOtlpLog = await otlpRes.json();
+    updateSinkCards(stats, lastOtlpLog);
+  } catch (_) {
+    // silently ignore during page load
+  }
+}
+
+function dotClass(received, failed) {
+  if (failed > 0) return 'failed';
+  if (received > 0) return 'active';
+  return '';
+}
+
+function updateSinkCards(stats, otlpLog) {
+  // JSONL
+  const jsonlKb = stats.jsonl?.size_kb ?? 0;
+  setSinkDot('jsonl', jsonlKb > 0 ? 'active' : '');
+  document.getElementById('sink-stat-jsonl').textContent = `${jsonlKb} KB`;
+
+  // SQLite
+  const sqliteRows = stats.sqlite?.rows ?? 0;
+  setSinkDot('sqlite', sqliteRows > 0 ? 'active' : '');
+  document.getElementById('sink-stat-sqlite').textContent = `${sqliteRows} rows`;
+
+  // HTTP
+  const httpRec    = stats.http?.received ?? 0;
+  const httpFailed = stats.http?.failed   ?? 0;
+  setSinkDot('http', dotClass(httpRec, httpFailed));
+  document.getElementById('sink-stat-http').textContent = `${httpRec} received`;
+  const httpDetail = document.getElementById('sink-detail-http');
+  if (httpFailed > 0) {
+    httpDetail.innerHTML = `<span class="sink-failed-count">${httpFailed} failed</span>`;
+  } else if (httpRec > 0) {
+    // Show action name from latest delivery if available
+    fetch('/api/sink/http-log')
+      .then(r => r.json())
+      .then(log => {
+        const last = log[0];
+        const action = last?.payload?.action || '';
+        httpDetail.textContent = action ? `Last: ${action}` : `${httpRec} deliveries OK`;
+      })
+      .catch(() => {});
+  } else {
+    httpDetail.textContent = 'Waiting for delivery…';
+  }
+
+  // OTLP
+  const otlpRec    = stats.otlp?.received ?? 0;
+  const otlpFailed = stats.otlp?.failed   ?? 0;
+  setSinkDot('otlp', dotClass(otlpRec, otlpFailed));
+  document.getElementById('sink-stat-otlp').textContent = `${otlpRec} received`;
+  const otlpDetail   = document.getElementById('sink-detail-otlp');
+  const otlpToggle   = document.getElementById('otlp-payload-toggle');
+  if (otlpFailed > 0) {
+    otlpDetail.innerHTML = `<span class="sink-failed-count">${otlpFailed} failed</span>`;
+  } else if (otlpRec > 0) {
+    const last = otlpLog[0];
+    otlpDetail.textContent = last?.span_name ? `Last: ${last.span_name}` : `${otlpRec} deliveries OK`;
+    otlpToggle.style.display = 'block';
+    // Update payload content if already expanded
+    if (otlpPayloadVisible && last?.full_payload) {
+      document.getElementById('otlp-payload-pre').textContent =
+        JSON.stringify(last.full_payload, null, 2);
+    }
+  } else {
+    otlpDetail.textContent  = 'Waiting for delivery…';
+    otlpToggle.style.display = 'none';
+  }
+}
+
+function setSinkDot(name, cls) {
+  const dot = document.getElementById(`sink-dot-${name}`);
+  if (!dot) return;
+  dot.className = 'sink-dot' + (cls ? ` ${cls}` : '');
+}
+
+function toggleOtlpPayload() {
+  otlpPayloadVisible = !otlpPayloadVisible;
+  const wrap = document.getElementById('otlp-payload-wrap');
+  const btn  = document.getElementById('otlp-payload-btn');
+  wrap.style.display = otlpPayloadVisible ? 'block' : 'none';
+  btn.textContent    = otlpPayloadVisible ? 'Hide payload ▴' : 'View last payload ▸';
+  if (otlpPayloadVisible && lastOtlpLog[0]?.full_payload) {
+    document.getElementById('otlp-payload-pre').textContent =
+      JSON.stringify(lastOtlpLog[0].full_payload, null, 2);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Explore tab — TraceLog query builder
+// ---------------------------------------------------------------------------
+
+const FILTER_FIELDS = ['status', 'kind', 'action', 'actor', 'correlation_id'];
+const FILTER_OPS    = [
+  { value: 'eq',         label: '=' },
+  { value: 'contains',   label: 'contains' },
+  { value: 'startswith', label: 'starts with' },
+  { value: 'endswith',   label: 'ends with' },
+];
+
+function addFilter() {
+  if (queryFilters.length >= 3) return;
+  const id = ++queryFilterIdSeq;
+  queryFilters.push({ id, field: 'status', op: 'eq', value: '' });
+  renderQueryFilters();
+  updateQuerySnippet();
+  if (queryFilters.length >= 3) {
+    document.getElementById('query-add-btn').style.display = 'none';
+  }
+}
+
+function removeFilter(id) {
+  queryFilters = queryFilters.filter(f => f.id !== id);
+  renderQueryFilters();
+  updateQuerySnippet();
+  document.getElementById('query-add-btn').style.display = '';
+}
+
+function updateFilter(id, key, value) {
+  const f = queryFilters.find(f => f.id === id);
+  if (f) f[key] = value;
+  updateQuerySnippet();
+}
+
+function renderQueryFilters() {
+  const container = document.getElementById('query-filters');
+  container.innerHTML = queryFilters.map(f => `
+    <div class="filter-row">
+      <select onchange="updateFilter(${f.id}, 'field', this.value)">
+        ${FILTER_FIELDS.map(opt =>
+          `<option value="${opt}"${f.field === opt ? ' selected' : ''}>${opt}</option>`
+        ).join('')}
+      </select>
+      <select onchange="updateFilter(${f.id}, 'op', this.value)">
+        ${FILTER_OPS.map(op =>
+          `<option value="${op.value}"${f.op === op.value ? ' selected' : ''}>${op.label}</option>`
+        ).join('')}
+      </select>
+      <input type="text" value="${escapeAttr(f.value)}"
+             oninput="updateFilter(${f.id}, 'value', this.value)"
+             placeholder="value" />
+      <button class="filter-remove" onclick="removeFilter(${f.id})">×</button>
+    </div>
+  `).join('');
+}
+
+function buildFilters() {
+  const filters = {};
+  queryFilters.forEach(f => {
+    if (f.value.trim()) {
+      const key = f.op === 'eq' ? f.field : `${f.field}__${f.op}`;
+      filters[key] = f.value.trim();
+    }
+  });
+  return filters;
+}
+
+function updateQuerySnippet() {
+  const pre = document.getElementById('query-snippet-pre');
+  const lines = ['TraceLog("data/traces/traces.jsonl")'];
+  queryFilters.forEach(f => {
+    if (f.value.trim()) {
+      const key = f.op === 'eq' ? f.field : `${f.field}__${f.op}`;
+      lines.push(`    .filter(${key}="${f.value.trim()}")`);
+    }
+  });
+  lines.push('    .last(20)');
+  pre.textContent = lines.join('\n');
+}
+
+async function runQuery() {
+  const filters = buildFilters();
+  try {
+    const res = await fetch('/api/tracelog/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filters, limit: 20 }),
+    });
+    const traces = await res.json();
+    queryHasRun = true;
+    renderQueryResults(traces);
+  } catch (err) {
+    setStatus(`Query error: ${err.message}`);
+  }
+}
+
+async function openQueryInViewer() {
+  const filters = buildFilters();
+  try {
+    const res = await fetch('/api/tracelog/view', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filters }),
+    });
+    const { url } = await res.json();
+    window.open(url, '_blank', 'noopener');
+  } catch (err) {
+    setStatus(`Could not open viewer: ${err.message}`);
+  }
+}
+
+function renderQueryResults(traces) {
+  const area  = document.getElementById('query-results-area');
+  const noRun = document.getElementById('query-not-run');
+  const count = document.getElementById('query-results-count');
+  const table = document.getElementById('query-results-table');
+
+  noRun.style.display = 'none';
+  area.style.display  = 'block';
+
+  const n = traces.length;
+  count.textContent = `${n} trace${n !== 1 ? 's' : ''} matched.`;
+
+  if (n === 0) {
+    table.innerHTML = `<div class="query-empty">No traces matched.</div>`;
+    return;
+  }
+
+  let html = `
+    <table class="mini-table">
+      <thead><tr>
+        <th>Time</th><th>Action</th><th>Kind</th><th>Status</th><th>Duration</th>
+      </tr></thead>
+      <tbody>
+  `;
+  for (const t of traces) {
+    const dur = t.duration_ms != null ? `${t.duration_ms.toFixed(1)} ms` : '—';
+    html += `
+      <tr>
+        <td class="mono dim">${formatTime(t.started_at)}</td>
+        <td class="mono bold">${escapeHtml(t.action || '—')}</td>
+        <td><span class="badge badge-${escapeHtml(t.kind || 'app')}">${escapeHtml(t.kind || '—')}</span></td>
+        <td>${makeStatusBadge(t.status)}</td>
+        <td class="mono">${dur}</td>
+      </tr>
+    `;
+  }
+  html += `</tbody></table>`;
+  table.innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar search filter
+// ---------------------------------------------------------------------------
+
+function filterActions(query) {
+  const q = query.trim().toLowerCase();
+  document.querySelectorAll('#sidebar-actions .action-card').forEach(card => {
+    const label = (card.dataset.label || '').toLowerCase();
+    card.style.display = (!q || label.includes(q)) ? '' : 'none';
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Column drag-to-resize
+// ---------------------------------------------------------------------------
+
+function makeDragResizer(handleId, panelId, growsLeft) {
+  const handle = document.getElementById(handleId);
+  const panel  = document.getElementById(panelId);
+  if (!handle || !panel) return;
+
+  let dragging = false, startX = 0, startW = 0;
+
+  handle.addEventListener('mousedown', e => {
+    dragging = true;
+    startX   = e.clientX;
+    startW   = panel.getBoundingClientRect().width;
+    handle.classList.add('dragging');
+    document.body.style.cursor     = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const delta = e.clientX - startX;
+    const newW  = growsLeft
+      ? Math.max(180, Math.min(440, startW - delta))
+      : Math.max(160, Math.min(460, startW + delta));
+    panel.style.width = newW + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.style.cursor     = '';
+    document.body.style.userSelect = '';
+  });
+}
+
+function initSidebarDrag() {
+  makeDragResizer('drag-handle',       'sidebar',     false);
+  makeDragResizer('drag-handle-right', 'detail-pane', true);
 }
 
 // ---------------------------------------------------------------------------
@@ -606,10 +883,8 @@ function formatTime(iso) {
   } catch { return iso; }
 }
 
-// syntaxHighlight() — JSON with coloured spans for the inline JSON view
 function syntaxHighlight(obj) {
-  const raw = JSON.stringify(obj, null, 2);
-  const escaped = raw
+  const escaped = JSON.stringify(obj, null, 2)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return escaped.replace(
     /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^"\\])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
@@ -640,148 +915,10 @@ function setStatus(msg) {
 }
 
 // ---------------------------------------------------------------------------
-// Sidebar — action search filter
-// ---------------------------------------------------------------------------
-
-function filterActions(query) {
-  const q = query.trim().toLowerCase();
-  document.querySelectorAll('#sidebar-actions .action-card').forEach(card => {
-    const label = (card.dataset.label || '').toLowerCase();
-    card.style.display = (!q || label.includes(q)) ? '' : 'none';
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Column drag-to-resize (shared factory)
-// ---------------------------------------------------------------------------
-
-// makeDragResizer(handleId, panelId, growsLeft)
-//   growsLeft=false → dragging right widens the panel (left sidebar)
-//   growsLeft=true  → dragging left widens the panel (right detail pane)
-function makeDragResizer(handleId, panelId, growsLeft) {
-  const handle = document.getElementById(handleId);
-  const panel  = document.getElementById(panelId);
-  if (!handle || !panel) return;
-
-  let dragging = false, startX = 0, startW = 0;
-
-  handle.addEventListener('mousedown', e => {
-    dragging = true;
-    startX   = e.clientX;
-    startW   = panel.getBoundingClientRect().width;
-    handle.classList.add('dragging');
-    document.body.style.cursor     = 'col-resize';
-    document.body.style.userSelect = 'none';
-    e.preventDefault();
-  });
-
-  document.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    const delta = e.clientX - startX;
-    const newW  = growsLeft
-      ? Math.max(180, Math.min(440, startW - delta))   // right panel
-      : Math.max(160, Math.min(460, startW + delta));   // left sidebar
-    panel.style.width = newW + 'px';
-  });
-
-  document.addEventListener('mouseup', () => {
-    if (!dragging) return;
-    dragging = false;
-    handle.classList.remove('dragging');
-    document.body.style.cursor     = '';
-    document.body.style.userSelect = '';
-  });
-}
-
-function initSidebarDrag() {
-  makeDragResizer('drag-handle', 'sidebar', false);
-  makeDragResizer('drag-handle-right', 'detail-pane', true);
-}
-
-// ---------------------------------------------------------------------------
-// TraceMap — zoom / pan
-// ---------------------------------------------------------------------------
-
-let mapScale = 1, mapPanX = 0, mapPanY = 0;
-let mapPanning = false, panStartX = 0, panStartY = 0, panOriginX = 0, panOriginY = 0;
-
-function applyMapTransform() {
-  const vp = document.getElementById('map-viewport');
-  if (vp) {
-    vp.setAttribute('transform',
-      `translate(${mapPanX.toFixed(2)},${mapPanY.toFixed(2)}) scale(${mapScale.toFixed(3)})`);
-  }
-  const lbl = document.getElementById('map-zoom-label');
-  if (lbl) lbl.textContent = Math.round(mapScale * 100) + '%';
-}
-
-// Zoom toward a point in SVG viewBox coordinates (cx, cy).
-// Called by +/− buttons (cx/cy default to canvas centre) and wheel.
-function mapZoom(factor, cx, cy) {
-  if (cx === undefined) cx = 400;
-  if (cy === undefined) cy = 230;
-  const newScale     = Math.max(0.2, Math.min(5, mapScale * factor));
-  const actualFactor = newScale / mapScale;
-  mapPanX  = cx - (cx - mapPanX) * actualFactor;
-  mapPanY  = cy - (cy - mapPanY) * actualFactor;
-  mapScale = newScale;
-  applyMapTransform();
-}
-
-function mapZoomReset() {
-  mapScale = 1; mapPanX = 0; mapPanY = 0;
-  applyMapTransform();
-}
-
-function initMapZoomPan() {
-  const svg = document.getElementById('trace-map-svg');
-  if (!svg) return;
-
-  // Wheel zoom toward cursor
-  svg.addEventListener('wheel', e => {
-    e.preventDefault();
-    const rect   = svg.getBoundingClientRect();
-    const cx     = (e.clientX - rect.left)  / rect.width  * 800;
-    const cy     = (e.clientY - rect.top)   / rect.height * 460;
-    const factor = e.deltaY < 0 ? 1.1 : 0.909;
-    mapZoom(factor, cx, cy);
-  }, { passive: false });
-
-  // Drag to pan
-  svg.addEventListener('mousedown', e => {
-    if (e.button !== 0) return;
-    mapPanning  = true;
-    panStartX   = e.clientX;
-    panStartY   = e.clientY;
-    panOriginX  = mapPanX;
-    panOriginY  = mapPanY;
-    svg.style.cursor = 'grabbing';
-    e.preventDefault();
-  });
-
-  document.addEventListener('mousemove', e => {
-    if (!mapPanning) return;
-    const rect  = svg.getBoundingClientRect();
-    const scaleX = 800 / rect.width;
-    const scaleY = 460 / rect.height;
-    mapPanX = panOriginX + (e.clientX - panStartX) * scaleX;
-    mapPanY = panOriginY + (e.clientY - panStartY) * scaleY;
-    applyMapTransform();
-  });
-
-  document.addEventListener('mouseup', () => {
-    if (!mapPanning) return;
-    mapPanning = false;
-    svg.style.cursor = '';
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
 window.addEventListener('DOMContentLoaded', () => {
   loadTraces();
   initSidebarDrag();
-  initMapZoomPan();
 });

@@ -25,18 +25,25 @@
 #
 # Then open http://localhost:5001 in your browser.
 
+import collections
 import json
 import os
 import random
 import time
 import uuid
+from datetime import datetime
 
 from flask import Flask, jsonify, request, send_from_directory
 
 from traceact import (
     ActionTrace,
+    AsyncSink,
+    HttpSink,
     JsonlSink,
+    OtlpSink,
+    SqliteSink,
     TraceConfig,
+    TraceLog,
     configure,
     traced_action,
 )
@@ -52,13 +59,33 @@ from traceact import (
 # The JSONL file lives at data/traces/traces.jsonl relative to this file.
 # JsonlSink creates the parent directories automatically.
 
-TRACES_DIR = os.path.join(os.path.dirname(__file__), "data", "traces")
+TRACES_DIR  = os.path.join(os.path.dirname(__file__), "data", "traces")
 TRACES_FILE = os.path.join(TRACES_DIR, "traces.jsonl")
+TRACES_DB   = os.path.join(os.path.dirname(__file__), "data", "traces.db")
+
+# Each sink points at an echo endpoint inside this same Flask app — no external
+# collector required. OtlpSink appends /v1/traces to the base URL it receives.
+http_sink   = HttpSink("http://127.0.0.1:5001/sink/http-receive", timeout=2.0)
+otlp_sink   = OtlpSink(
+    "http://127.0.0.1:5001/sink/otlp-receive",
+    timeout=2.0,
+    resource_attributes={"service.name": "traceact-demo", "deployment.env": "local"},
+)
+sqlite_sink = SqliteSink(TRACES_DB)
+async_http  = AsyncSink([http_sink])
+async_otlp  = AsyncSink([otlp_sink])
 
 configure(
     config=TraceConfig(sink_mode="blocking"),
-    sinks=[JsonlSink(TRACES_FILE)],
+    sinks=[JsonlSink(TRACES_FILE), sqlite_sink, async_http, async_otlp],
 )
+
+# ---------------------------------------------------------------------------
+# In-memory echo stores — last 20 deliveries per sink, newest first
+# ---------------------------------------------------------------------------
+
+_http_log: collections.deque = collections.deque(maxlen=20)
+_otlp_log: collections.deque = collections.deque(maxlen=20)
 
 # ---------------------------------------------------------------------------
 # Flask app setup
@@ -267,6 +294,11 @@ def auth_login():
 
     with ActionTrace.start(action="auth.login", kind="app", actor="user") as trace:
         trace.input({"username": username})
+        trace.step("Checking rate limiter")
+        time.sleep(0.004)
+
+        trace.http(operation="post", target="rate-limiter.internal",
+                   status_code=200, duration_ms=4.0)
         trace.step("Validating credentials")
         time.sleep(0.008)
 
@@ -275,6 +307,8 @@ def auth_login():
         time.sleep(0.004)
 
         session_token = f"sess_{uuid.uuid4().hex[:16]}"
+        trace.event(kind="db", operation="insert", target="sessions", rows=1)
+        trace.step("Recording audit event")
         trace.event(kind="db", operation="insert", target="audit_log", rows=1)
         trace.step("Session created and audit event recorded")
         trace.output({"session_token": session_token, "authenticated": True})
@@ -302,14 +336,23 @@ def email_campaign():
         subscriber_count = random.randint(50, 200)
         trace.event(kind="db", operation="select", target="subscribers",
                     rows=subscriber_count)
+        trace.step("Filtering unsubscribes")
+        time.sleep(0.005)
+
+        trace.event(kind="db", operation="select", target="unsubscribes", rows=0)
         trace.step(f"Rendering template for {subscriber_count} subscribers")
         time.sleep(0.006)
 
+        trace.event(kind="app", operation="compute", target="template-engine",
+                    template="newsletter_v2")
         trace.step("Dispatching campaign via campaign service")
         trace.event(kind="email", operation="send", target="campaign-service",
                     recipient_count=subscriber_count, subject=subject)
         time.sleep(0.012)
 
+        trace.step("Recording delivery log")
+        trace.event(kind="db", operation="insert", target="delivery_log",
+                    rows=subscriber_count)
         trace.output({"sent": subscriber_count, "subject": subject})
 
     return jsonify({"ok": True, "sent": subscriber_count})
@@ -339,6 +382,9 @@ def report_export():
         time.sleep(0.005)
 
         size_kb = round(row_count * 0.38, 1)
+        trace.http(operation="put", target="s3.reports-bucket",
+                   status_code=200, duration_ms=12.0)
+        trace.step("Report uploaded to storage")
         trace.output({"format": "csv", "rows": row_count, "size_kb": size_kb})
 
     return jsonify({"ok": True, "rows": row_count, "size_kb": size_kb})
@@ -385,16 +431,117 @@ def import_bulk():
         trace.step(f"Parsing and validating {row_count} incoming records")
         time.sleep(0.014)
 
-        trace.event(kind="app", operation="compute", target="rng",
+        trace.event(kind="app", operation="compute", target="validator",
                     rows_validated=row_count)
+        trace.step("Checking for duplicates")
+        time.sleep(0.008)
+
+        trace.event(kind="db", operation="select", target="dedup_index",
+                    rows=row_count)
         trace.step("Batch inserting records into database")
         time.sleep(0.028)
 
         trace.event(kind="db", operation="insert", target="imports", rows=row_count)
-        trace.step("Import complete — search index updated")
+        trace.step("Updating search index")
+        trace.http(operation="post", target="search.indexer",
+                   status_code=202, duration_ms=15.0)
+        trace.step("Import complete")
         trace.output({"imported": row_count, "failed": 0})
 
     return jsonify({"ok": True, "imported": row_count})
+
+
+# ---------------------------------------------------------------------------
+# Sink echo endpoints — receive deliveries from HttpSink / OtlpSink
+# ---------------------------------------------------------------------------
+
+@app.route("/sink/http-receive", methods=["POST"])
+def sink_http_receive():
+    _http_log.appendleft({
+        "received_at": datetime.utcnow().isoformat() + "Z",
+        "payload": request.get_json(force=True, silent=True) or {},
+    })
+    return "", 200
+
+
+# OtlpSink posts to {endpoint}/v1/traces — the route must include that suffix.
+@app.route("/sink/otlp-receive/v1/traces", methods=["POST"])
+def sink_otlp_receive():
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        span = body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    except (KeyError, IndexError):
+        span = {}
+    _otlp_log.appendleft({
+        "received_at": datetime.utcnow().isoformat() + "Z",
+        "span_name":   span.get("name", "—"),
+        "trace_id":    span.get("traceId", "—"),
+        "status":      span.get("status", {}),
+        "attributes":  span.get("attributes", []),
+        "events":      span.get("events", []),
+        "full_payload": body,
+    })
+    return "", 200
+
+
+# ---------------------------------------------------------------------------
+# Sink log APIs — read back what was delivered
+# ---------------------------------------------------------------------------
+
+@app.route("/api/sink/http-log")
+def api_sink_http_log():
+    return jsonify(list(_http_log))
+
+
+@app.route("/api/sink/otlp-log")
+def api_sink_otlp_log():
+    return jsonify(list(_otlp_log))
+
+
+@app.route("/api/sink-stats")
+def api_sink_stats():
+    jsonl_kb = round(os.path.getsize(TRACES_FILE) / 1024, 1) if os.path.exists(TRACES_FILE) else 0
+    try:
+        import sqlite3
+        conn = sqlite3.connect(TRACES_DB)
+        sqlite_rows = conn.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+        conn.close()
+    except Exception:
+        sqlite_rows = 0
+    return jsonify({
+        "jsonl":  {"size_kb": jsonl_kb},
+        "sqlite": {"rows": sqlite_rows},
+        "http":   {"received": len(_http_log), "failed": http_sink.failed},
+        "otlp":   {"received": len(_otlp_log), "failed": otlp_sink.failed},
+        "async":  {"http_dropped": async_http.dropped, "otlp_dropped": async_otlp.dropped},
+    })
+
+
+# ---------------------------------------------------------------------------
+# TraceLog query API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/tracelog/query", methods=["POST"])
+def api_tracelog_query():
+    body    = request.get_json() or {}
+    filters = body.get("filters", {})
+    limit   = int(body.get("limit", 20))
+    log     = TraceLog(TRACES_FILE)
+    for key, value in filters.items():
+        if value:
+            log = log.filter(**{key: value})
+    return jsonify(log.last(limit))
+
+
+@app.route("/api/tracelog/view", methods=["POST"])
+def api_tracelog_view():
+    body    = request.get_json() or {}
+    filters = body.get("filters", {})
+    log     = TraceLog(TRACES_FILE)
+    for key, value in filters.items():
+        if value:
+            log = log.filter(**{key: value})
+    return jsonify({"url": log.view(open_browser=False)})
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +588,8 @@ def get_traces():
 def clear_traces():
     if os.path.exists(TRACES_FILE):
         os.remove(TRACES_FILE)
+    if os.path.exists(TRACES_DB):
+        os.remove(TRACES_DB)
     return jsonify({"ok": True})
 
 

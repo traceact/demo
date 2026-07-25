@@ -11,12 +11,12 @@
   <header>
     <div class="header-inner">
       <div class="brand">
-        <span class="brand-icon">⬡</span>
+        <span class="brand-mark"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="20" height="20" style="display:block"><rect x="0" y="0" width="32" height="32" rx="7" fill="#0d1114"/><rect x="0.75" y="0.75" width="30.5" height="30.5" rx="6.25" fill="none" stroke="#353F44" stroke-width="1.5"/><circle cx="8.5" cy="17.5" r="1.8" fill="#0d1114" stroke="#4ade80" stroke-width="1.6"/><path d="M8.5 17.5 L13.5 22.5 L24 10.5" fill="none" stroke="#4ade80" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="24" cy="10.5" r="2.1" fill="#4ade80"/></svg></span>
         <span class="brand-name">TraceAct</span>
         <span class="brand-sub">demo</span>
       </div>
       <div class="header-meta">
-        traces written to <code>data/traces/traces.jsonl</code>
+        traces at <code>data/traces/traces.jsonl</code>
       </div>
     </div>
   </header>
@@ -77,7 +77,7 @@
           </div>
         </div>
 
-        <div class="action-card" data-label="user login">
+        <div class="action-card" data-label="user login auth">
           <div class="card-top">
             <span class="card-name">User login</span>
             <button class="btn btn-xs btn-primary" onclick="authLogin()">Run</button>
@@ -124,146 +124,150 @@
       </div><!-- /#sidebar-actions -->
     </aside>
 
-    <!-- Drag-to-resize handle -->
+    <!-- Drag handle (left) -->
     <div id="drag-handle"></div>
 
     <!-- ================================================================
-         Main pane — status bar + tabs + TraceLog / TraceMap
+         Main pane — tabs: Traces / Explore
          ================================================================ -->
     <main id="main-pane">
-
-      <!-- Status bar -->
-      <div class="status-bar">
-        <span id="status-msg" class="status-msg"></span>
-        <div class="status-bar-actions">
-          <button class="btn btn-sm btn-ghost-danger"
-                  data-tooltip="Deletes traces.jsonl and resets the viewer. The file is recreated on the next action."
-                  onclick="clearTraces()">Clear traces</button>
-          <button class="btn btn-sm btn-ghost" onclick="loadTraces()">↺ Refresh</button>
-        </div>
-      </div>
 
       <!-- Tab bar -->
       <div class="viewer-tabs-bar">
         <div class="viewer-tabs">
-          <button class="tab-btn active" id="tab-log" onclick="switchTab('log')">TraceLog</button>
-          <button class="tab-btn" id="tab-map" onclick="switchTab('map')">TraceMap</button>
+          <button class="tab-btn active" id="tab-traces"  onclick="switchTab('traces')">Traces</button>
+          <button class="tab-btn"        id="tab-map"     onclick="switchTab('map')">Map</button>
+          <button class="tab-btn"        id="tab-explore" onclick="switchTab('explore')">Explore</button>
         </div>
       </div>
 
-      <!-- ── TraceLog pane ─────────────────────────────────────── -->
-      <div id="pane-log" class="tab-pane active">
+      <!-- ── Traces pane ──────────────────────────────────────────── -->
+      <div id="pane-traces" class="tab-pane active">
+
+        <div class="traces-toolbar">
+          <input id="trace-search" type="text" placeholder="Search traces…"
+                 oninput="filterTable(this.value)" autocomplete="off" />
+          <span id="status-msg" class="status-msg"></span>
+          <div class="toolbar-actions">
+            <button class="btn btn-sm" onclick="openInViewer()">Open in viewer ↗</button>
+            <button class="btn btn-sm btn-danger"
+                    data-tooltip="Deletes traces.jsonl + traces.db and resets the viewer. Files are recreated on the next action."
+                    onclick="clearTraces()">Clear</button>
+          </div>
+        </div>
+
         <div class="trace-section">
           <div id="trace-container">
-            <div class="empty-state">No traces yet. Fire an action.</div>
+            <div class="empty-state">No traces yet — fire an action to get started.</div>
           </div>
         </div>
-      </div>
 
-      <!-- ── TraceMap pane ─────────────────────────────────────── -->
+      </div><!-- /#pane-traces -->
+
+      <!-- ── Explore pane ─────────────────────────────────────────── -->
+      <div id="pane-explore" class="tab-pane">
+        <div class="explore-body">
+
+          <!-- Sinks dashboard -->
+          <div class="explore-section">
+            <div class="insp-section-label">Sinks</div>
+            <div class="sink-cards">
+
+              <div class="sink-card">
+                <div class="sink-card-header">
+                  <div class="sink-dot" id="sink-dot-jsonl"></div>
+                  <div class="sink-name">JSONL</div>
+                </div>
+                <div class="sink-stat" id="sink-stat-jsonl">— KB</div>
+                <div class="sink-detail">data/traces/traces.jsonl</div>
+              </div>
+
+              <div class="sink-card">
+                <div class="sink-card-header">
+                  <div class="sink-dot" id="sink-dot-sqlite"></div>
+                  <div class="sink-name">SQLite</div>
+                </div>
+                <div class="sink-stat" id="sink-stat-sqlite">— rows</div>
+                <div class="sink-detail">data/traces.db</div>
+              </div>
+
+              <div class="sink-card">
+                <div class="sink-card-header">
+                  <div class="sink-dot" id="sink-dot-http"></div>
+                  <div class="sink-name">HTTP</div>
+                </div>
+                <div class="sink-stat" id="sink-stat-http">0 received</div>
+                <div class="sink-detail" id="sink-detail-http">Waiting for delivery…</div>
+              </div>
+
+              <div class="sink-card">
+                <div class="sink-card-header">
+                  <div class="sink-dot" id="sink-dot-otlp"></div>
+                  <div class="sink-name">OTLP</div>
+                </div>
+                <div class="sink-stat" id="sink-stat-otlp">0 received</div>
+                <div class="sink-detail" id="sink-detail-otlp">Waiting for delivery…</div>
+                <div id="otlp-payload-toggle" style="display:none">
+                  <button class="otlp-payload-btn" id="otlp-payload-btn"
+                          onclick="toggleOtlpPayload()">View last payload ▸</button>
+                  <div id="otlp-payload-wrap" style="display:none; margin-top:8px">
+                    <div class="otlp-payload-caption">
+                      Unmapped TraceAct fields appear as <code>traceact.*</code> span attributes
+                      — nothing is lost when the schema grows.
+                    </div>
+                    <pre class="otlp-payload-pre" id="otlp-payload-pre"></pre>
+                  </div>
+                </div>
+              </div>
+
+            </div><!-- /.sink-cards -->
+          </div><!-- /sinks section -->
+
+          <!-- TraceLog query builder -->
+          <div class="explore-section">
+            <div class="insp-section-label">TraceLog query</div>
+
+            <div class="query-filters" id="query-filters">
+              <!-- filter rows injected by JS -->
+            </div>
+
+            <button class="query-add-btn" id="query-add-btn" onclick="addFilter()">
+              + Add filter
+            </button>
+
+            <div class="query-actions">
+              <button class="btn btn-sm btn-primary" onclick="runQuery()">Run</button>
+              <button class="btn btn-sm" onclick="openQueryInViewer()">Open in viewer ↗</button>
+            </div>
+
+            <div class="query-snippet-wrap">
+              <div class="query-snippet-label">Python equivalent</div>
+              <pre class="query-snippet-pre" id="query-snippet-pre">TraceLog("data/traces/traces.jsonl")
+    .last(20)</pre>
+            </div>
+
+            <div id="query-results-area" style="display:none">
+              <div class="query-results-label">Results</div>
+              <div id="query-results-count" class="query-results-count"></div>
+              <div id="query-results-table"></div>
+            </div>
+            <div id="query-not-run" class="query-empty">Run a query to see results.</div>
+
+          </div><!-- /query section -->
+
+        </div><!-- /.explore-body -->
+      </div><!-- /#pane-explore -->
+
+      <!-- ── Map pane ───────────────────────────────────────────── -->
       <div id="pane-map" class="tab-pane">
-
+        <div class="map-pane-toolbar">
+          <span id="map-pane-label" class="map-pane-label">Select a trace to view its map.</span>
+        </div>
         <div class="map-canvas-wrap">
-
-          <!-- Zoom controls (absolute, top-right of canvas) -->
-          <div class="map-zoom-controls">
-            <button class="zoom-btn" onclick="mapZoom(1.25)" title="Zoom in">+</button>
-            <span id="map-zoom-label" class="zoom-label">100%</span>
-            <button class="zoom-btn" onclick="mapZoom(0.8)" title="Zoom out">−</button>
-            <button class="zoom-btn zoom-reset" onclick="mapZoomReset()" title="Reset zoom">⊙</button>
+          <div id="map-canvas" class="map-canvas">
+            <div class="map-empty">Select a trace from the Traces tab and click "View map →" to visualize it here.</div>
           </div>
-
-          <svg id="trace-map-svg"
-               viewBox="0 0 800 460"
-               overflow="visible"
-               xmlns="http://www.w3.org/2000/svg"
-               aria-label="TraceMap — system component graph">
-
-            <defs>
-              <pattern id="dot-grid" x="0" y="0" width="24" height="24"
-                       patternUnits="userSpaceOnUse">
-                <circle cx="1" cy="1" r="1" fill="#30363d" opacity="0.55"/>
-              </pattern>
-            </defs>
-
-            <!-- All content in a single group for zoom/pan via JS transform -->
-            <g id="map-viewport">
-
-              <!-- Extended background so panning never reveals bare edges -->
-              <rect x="-4000" y="-4000" width="9600" height="8920" fill="url(#dot-grid)"/>
-
-              <!-- Column headers -->
-              <text class="col-label" x="100" y="28" text-anchor="middle">Input</text>
-              <text class="col-label" x="390" y="28" text-anchor="middle">Application</text>
-              <text class="col-label" x="660" y="28" text-anchor="middle">Services</text>
-
-              <!-- Faint column dividers -->
-              <line x1="240" y1="38" x2="240" y2="450" stroke="#30363d" stroke-width="1" opacity="0.4"/>
-              <line x1="520" y1="38" x2="520" y2="450" stroke="#30363d" stroke-width="1" opacity="0.4"/>
-
-              <!-- EDGES -->
-              <g id="map-edges">
-                <g class="map-edge" id="map-edge-user-app">
-                  <path class="edge-base" d="M 170,230 L 320,230"/>
-                  <path class="edge-flow" d="M 170,230 L 320,230"/>
-                </g>
-                <g class="map-edge" id="map-edge-app-db">
-                  <path class="edge-base" d="M 460,230 C 530,230 530,90 590,90"/>
-                  <path class="edge-flow" d="M 460,230 C 530,230 530,90 590,90"/>
-                </g>
-                <g class="map-edge" id="map-edge-app-email">
-                  <path class="edge-base" d="M 460,230 C 530,230 530,190 590,190"/>
-                  <path class="edge-flow" d="M 460,230 C 530,230 530,190 590,190"/>
-                </g>
-                <g class="map-edge" id="map-edge-app-http">
-                  <path class="edge-base" d="M 460,230 C 530,230 530,290 590,290"/>
-                  <path class="edge-flow" d="M 460,230 C 530,230 530,290 590,290"/>
-                </g>
-                <g class="map-edge" id="map-edge-app-rng">
-                  <path class="edge-base" d="M 460,230 C 530,230 530,390 590,390"/>
-                  <path class="edge-flow" d="M 460,230 C 530,230 530,390 590,390"/>
-                </g>
-              </g>
-
-              <!-- NODES -->
-              <g id="map-nodes">
-                <g class="map-node" id="map-node-user">
-                  <rect class="node-bg" x="30"  y="206" width="140" height="48" rx="7"/>
-                  <text class="node-label" x="100" y="226">User</text>
-                  <text class="node-sub"   x="100" y="243">actor</text>
-                </g>
-                <g class="map-node" id="map-node-app">
-                  <rect class="node-bg" x="320" y="206" width="140" height="48" rx="7"/>
-                  <text class="node-label" x="390" y="226">Flask App</text>
-                  <text class="node-sub"   x="390" y="243">app</text>
-                </g>
-                <g class="map-node" id="map-node-db">
-                  <rect class="node-bg" x="590" y="66"  width="140" height="48" rx="7"/>
-                  <text class="node-label" x="660" y="86">Database</text>
-                  <text class="node-sub"   x="660" y="103">db</text>
-                </g>
-                <g class="map-node" id="map-node-email">
-                  <rect class="node-bg" x="590" y="166" width="140" height="48" rx="7"/>
-                  <text class="node-label" x="660" y="186">Email Service</text>
-                  <text class="node-sub"   x="660" y="203">email</text>
-                </g>
-                <g class="map-node" id="map-node-http">
-                  <rect class="node-bg" x="590" y="266" width="140" height="48" rx="7"/>
-                  <text class="node-label" x="660" y="286">External API</text>
-                  <text class="node-sub"   x="660" y="303">http</text>
-                </g>
-                <g class="map-node" id="map-node-rng">
-                  <rect class="node-bg" x="590" y="366" width="140" height="48" rx="7"/>
-                  <text class="node-label" x="660" y="386">RNG / Compute</text>
-                  <text class="node-sub"   x="660" y="403">app · compute</text>
-                </g>
-              </g>
-
-            </g><!-- /#map-viewport -->
-
-          </svg>
-        </div><!-- /.map-canvas-wrap -->
-
+        </div>
       </div><!-- /#pane-map -->
 
     </main><!-- /#main-pane -->
@@ -272,7 +276,7 @@
     <div id="drag-handle-right"></div>
 
     <!-- ================================================================
-         Detail pane — trace inspector (always visible, right column)
+         Detail pane — trace inspector
          ================================================================ -->
     <aside id="detail-pane">
       <div class="detail-pane-header">
@@ -283,7 +287,7 @@
       </div>
       <div id="map-details" class="map-details">
         <div class="map-details-empty">
-          Select a trace or fire an action.
+          Select a trace from the log or fire an action.
         </div>
       </div>
     </aside>
