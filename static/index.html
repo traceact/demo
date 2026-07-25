@@ -208,15 +208,7 @@
                 <div class="sink-stat" id="sink-stat-otlp">0 received</div>
                 <div class="sink-detail" id="sink-detail-otlp">Waiting for delivery…</div>
                 <div id="otlp-payload-toggle" style="display:none">
-                  <button class="otlp-payload-btn" id="otlp-payload-btn"
-                          onclick="toggleOtlpPayload()">View last payload ▸</button>
-                  <div id="otlp-payload-wrap" style="display:none; margin-top:8px">
-                    <div class="otlp-payload-caption">
-                      Unmapped TraceAct fields appear as <code>traceact.*</code> span attributes
-                      — nothing is lost when the schema grows.
-                    </div>
-                    <pre class="otlp-payload-pre" id="otlp-payload-pre"></pre>
-                  </div>
+                  <button class="otlp-payload-btn" onclick="openOtlpModal()">View last payload ▸</button>
                 </div>
               </div>
 
@@ -293,6 +285,20 @@
     </aside>
 
   </div><!-- /.app-body -->
+
+  <!-- OTLP payload modal -->
+  <div id="otlp-modal" class="otlp-modal-overlay" onclick="closeOtlpModal(event)" style="display:none">
+    <div class="otlp-modal-box">
+      <div class="otlp-modal-header">
+        <span class="otlp-modal-title">OTLP payload</span>
+        <button class="otlp-modal-close" onclick="closeOtlpModal()">×</button>
+      </div>
+      <div class="otlp-modal-caption">
+        Unmapped TraceAct fields appear as <code>traceact.*</code> span attributes — nothing is lost when the schema grows.
+      </div>
+      <pre class="otlp-modal-pre" id="otlp-modal-pre"></pre>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

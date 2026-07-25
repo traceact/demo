@@ -21,7 +21,6 @@ let expandedTraceId = null;    // trace row with JSON expanded
 let currentTab      = 'traces';
 
 let sinkStatsInterval = null;  // setInterval handle for Explore tab refresh
-let otlpPayloadVisible = false;
 let lastOtlpLog = [];          // latest /api/sink/otlp-log result
 
 // Query builder state
@@ -623,11 +622,6 @@ function updateSinkCards(stats, otlpLog) {
     const last = otlpLog[0];
     otlpDetail.textContent = last?.span_name ? `Last: ${last.span_name}` : `${otlpRec} deliveries OK`;
     otlpToggle.style.display = 'block';
-    // Update payload content if already expanded
-    if (otlpPayloadVisible && last?.full_payload) {
-      document.getElementById('otlp-payload-pre').textContent =
-        JSON.stringify(last.full_payload, null, 2);
-    }
   } else {
     otlpDetail.textContent  = 'Waiting for delivery…';
     otlpToggle.style.display = 'none';
@@ -640,16 +634,27 @@ function setSinkDot(name, cls) {
   dot.className = 'sink-dot' + (cls ? ` ${cls}` : '');
 }
 
-function toggleOtlpPayload() {
-  otlpPayloadVisible = !otlpPayloadVisible;
-  const wrap = document.getElementById('otlp-payload-wrap');
-  const btn  = document.getElementById('otlp-payload-btn');
-  wrap.style.display = otlpPayloadVisible ? 'block' : 'none';
-  btn.textContent    = otlpPayloadVisible ? 'Hide payload ▴' : 'View last payload ▸';
-  if (otlpPayloadVisible && lastOtlpLog[0]?.full_payload) {
-    document.getElementById('otlp-payload-pre').textContent =
-      JSON.stringify(lastOtlpLog[0].full_payload, null, 2);
+function openOtlpModal() {
+  const modal = document.getElementById('otlp-modal');
+  const pre   = document.getElementById('otlp-modal-pre');
+  if (lastOtlpLog[0]?.full_payload) {
+    pre.textContent = JSON.stringify(lastOtlpLog[0].full_payload, null, 2);
   }
+  modal.style.display = 'flex';
+  document.addEventListener('keydown', _otlpEscHandler);
+}
+
+function closeOtlpModal(event) {
+  if (event && event.target !== document.getElementById('otlp-modal') &&
+      event.type !== 'click') return;
+  if (event && event.target !== document.getElementById('otlp-modal') &&
+      !event.target.classList.contains('otlp-modal-close')) return;
+  document.getElementById('otlp-modal').style.display = 'none';
+  document.removeEventListener('keydown', _otlpEscHandler);
+}
+
+function _otlpEscHandler(e) {
+  if (e.key === 'Escape') closeOtlpModal({ target: document.getElementById('otlp-modal') });
 }
 
 // ---------------------------------------------------------------------------
