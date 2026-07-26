@@ -30,6 +30,8 @@ import json
 import os
 import random
 import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime
 
@@ -42,9 +44,11 @@ from traceact import (
     JsonlSink,
     OtlpSink,
     SqliteSink,
+    TraceActMiddleware,
     TraceConfig,
     TraceLog,
     configure,
+    inject_headers,
     traced_action,
 )
 
@@ -94,6 +98,7 @@ _otlp_log: collections.deque = collections.deque(maxlen=20)
 # static_folder="static" tells Flask where to find index.html, app.js, styles.css.
 # static_url_path="" means those files are served at the root, not /static/.
 app = Flask(__name__, static_folder="static", static_url_path="")
+app.wsgi_app = TraceActMiddleware(app.wsgi_app)
 
 
 @app.route("/")
@@ -449,6 +454,88 @@ def import_bulk():
         trace.output({"imported": row_count, "failed": 0})
 
     return jsonify({"ok": True, "imported": row_count})
+
+
+# ---------------------------------------------------------------------------
+# Action: Cross-service order (propagation demo)
+# ---------------------------------------------------------------------------
+#
+# Two routes standing in for two separate services, wired together by a real
+# HTTP call so TraceActMiddleware can propagate the trace context automatically.
+#
+# order.submit (order service) → inject_headers() → HTTP POST → payment.charge
+# payment.charge (payment service) — middleware extracts headers, no manual code
+
+@app.route("/api/order-submit", methods=["POST"])
+def order_submit():
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    corr_id  = f"corr_{uuid.uuid4().hex[:8]}"
+
+    with ActionTrace.start(
+        action="order.submit", kind="app", actor="user",
+        correlation_id=corr_id,
+    ) as trace:
+        trace.input({"order_id": order_id})
+        trace.step("Validating order")
+        time.sleep(0.008)
+
+        trace.event(kind="db", operation="select", target="inventory",
+                    rows=1)
+        trace.step("Reserving inventory")
+        time.sleep(0.006)
+
+        trace.event(kind="db", operation="update", target="inventory",
+                    rows=1)
+        trace.step("Calling payment service")
+
+        # inject_headers() stamps traceact-trace-id + traceact-correlation-id
+        # onto the outbound request so the payment service can link back to us.
+        prop_headers = inject_headers({"Content-Type": "application/json"})
+        req = urllib.request.Request(
+            "http://127.0.0.1:5001/api/payment-charge",
+            data=json.dumps({"order_id": order_id, "amount": 49.99}).encode(),
+            headers=prop_headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                charge_result = json.loads(resp.read())
+        except urllib.error.URLError as exc:
+            charge_result = {"ok": False, "error": str(exc)}
+
+        trace.http(operation="post", target="payment-service.internal",
+                   status_code=200 if charge_result.get("ok") else 500,
+                   duration_ms=18.0)
+        trace.step("Payment confirmed — order complete")
+        trace.output({"order_id": order_id, "charge": charge_result})
+
+    return jsonify({"ok": True, "order_id": order_id, "charge_result": charge_result})
+
+
+@app.route("/api/payment-charge", methods=["POST"])
+def payment_charge():
+    # TraceActMiddleware already extracted the propagation headers before this
+    # route runs — no manual propagation code needed here.
+    data       = request.get_json() or {}
+    order_id   = data.get("order_id", "unknown")
+    amount     = data.get("amount", 0)
+    charge_id  = f"chg_{uuid.uuid4().hex[:8]}"
+
+    with ActionTrace.start(action="payment.charge", kind="app") as trace:
+        trace.input({"order_id": order_id, "amount": amount})
+        trace.step("Validating card on file")
+        time.sleep(0.005)
+
+        trace.event(kind="db", operation="select", target="payment_methods", rows=1)
+        trace.step("Charging via payment gateway")
+        time.sleep(0.014)
+
+        trace.http(operation="post", target="payment.gateway",
+                   status_code=200, duration_ms=14.0)
+        trace.step("Charge authorised")
+        trace.output({"charge_id": charge_id, "amount": amount, "status": "authorised"})
+
+    return jsonify({"ok": True, "charge_id": charge_id, "amount": amount})
 
 
 # ---------------------------------------------------------------------------

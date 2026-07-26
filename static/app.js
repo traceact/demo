@@ -107,6 +107,10 @@ async function importBulk() {
   await fire('/api/import-bulk', { rows }, 'import.bulk');
 }
 
+async function orderSubmit() {
+  await fire('/api/order-submit', {}, 'order.submit');
+}
+
 async function clearTraces() {
   setStatus('Clearing traces…');
   try {
@@ -287,10 +291,12 @@ function renderTraceDetails(trace) {
     return;
   }
 
-  const steps   = trace.steps   || [];
-  const events  = trace.events  || [];
-  const touches = trace.touches || [];
-  const errors  = trace.errors  || [];
+  const steps   = trace.steps          || [];
+  const events  = trace.events         || [];
+  const touches = trace.touches        || [];
+  const errors  = trace.errors         || [];
+  const corrId  = trace.correlation_id || null;
+  const upstreamId = trace.upstream_trace_id || null;
 
   const stepsHtml = steps.length === 0
     ? `<div class="detail-none">no steps recorded</div>`
@@ -337,7 +343,14 @@ function renderTraceDetails(trace) {
 
   const dur = trace.duration_ms != null ? `${trace.duration_ms.toFixed(1)} ms` : '—';
 
+  const lineageHtml = (corrId || upstreamId) ? `
+    <div class="lineage-section">
+      ${corrId     ? `<div class="lineage-item"><span class="lineage-key">Corr</span><span class="lineage-val">${escapeHtml(corrId)}</span></div>` : ''}
+      ${upstreamId ? `<div class="lineage-item"><span class="lineage-key">Upstream</span><span class="lineage-val">${escapeHtml(upstreamId)}</span></div>` : ''}
+    </div>` : '';
+
   container.innerHTML = `
+    ${lineageHtml}
     <div class="detail-columns">
       <div class="detail-col">
         <div class="detail-col-title">Steps (${steps.length})</div>
@@ -661,7 +674,7 @@ function _otlpEscHandler(e) {
 // Explore tab — TraceLog query builder
 // ---------------------------------------------------------------------------
 
-const FILTER_FIELDS = ['status', 'kind', 'action', 'actor', 'correlation_id'];
+const FILTER_FIELDS = ['status', 'kind', 'action', 'actor', 'correlation_id', 'upstream_trace_id'];
 const FILTER_OPS    = [
   { value: 'eq',         label: '=' },
   { value: 'contains',   label: 'contains' },

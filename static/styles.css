@@ -879,6 +879,39 @@ header {
 .detail-action { font-size: 12px; font-weight: 700; }
 .detail-dur { font-size: 11px; color: var(--text-dim); }
 
+.lineage-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.lineage-item {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.lineage-key {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  width: 52px;
+}
+.lineage-val {
+  font-family: var(--mono);
+  color: var(--text-dim);
+  word-break: break-all;
+  user-select: all;
+}
+
 .detail-columns { display: flex; flex-direction: column; gap: 14px; }
 .detail-col-title {
   font-size: 10px;
