@@ -45,6 +45,7 @@ from traceact import (
     OtlpSink,
     SqliteSink,
     TraceActMiddleware,
+    TraceBudget,
     TraceConfig,
     TraceLog,
     configure,
@@ -283,6 +284,43 @@ def trigger_error():
         pass
 
     return jsonify({"ok": True, "message": "Error triggered and recorded in trace"})
+
+
+# ---------------------------------------------------------------------------
+# Action: Sampled-out failure
+# ---------------------------------------------------------------------------
+#
+# Demonstrates always_trace_errors under sampling. This action runs with a
+# per-call budget of sample_rate=0.0 (every call is sampled out) and
+# always_trace_errors=True. In a sampled-out trace nothing is recorded while
+# the action runs — but because the action fails, TraceAct still writes a
+# record after the fact: status="failed", the error, and sampled_out=true,
+# with empty steps/events (there was no recording to capture them).
+#
+# The budget override is scoped to this one action; every other action in the
+# demo keeps the default record-everything behaviour. Fire this a few times
+# and watch the "sampled-out errors" counter on the Explore tab climb.
+
+@app.route("/api/sampled-failure", methods=["POST"])
+def sampled_failure():
+    try:
+        with ActionTrace.start(
+            action="sampled.failure",
+            kind="app",
+            actor="user",
+            budget=TraceBudget(sample_rate=0.0, always_trace_errors=True),
+        ) as trace:
+            # These calls are silent no-ops: the trace is sampled out, so
+            # nothing is recorded until (and unless) the action fails.
+            trace.step("Charging card — not recorded while sampled out")
+            trace.event(kind="http", operation="post", target="payment.gateway")
+            raise ValueError("Simulated failure under 100% sampling")
+    except ValueError:
+        # The promoted failure record was written on __exit__; swallow the
+        # exception so the HTTP response stays clean, same as trigger-error.
+        pass
+
+    return jsonify({"ok": True, "message": "Sampled-out failure recorded"})
 
 
 # ---------------------------------------------------------------------------
@@ -595,12 +633,21 @@ def api_sink_stats():
         conn.close()
     except Exception:
         sqlite_rows = 0
+    # Count error-only records promoted from sampled-out traces (see the
+    # sampled-failure action). filter(sampled_out=True) skips every normal
+    # record — including older ones written before the field existed, since a
+    # missing field never matches an exact filter.
+    try:
+        sampled_out = TraceLog(TRACES_FILE).filter(sampled_out=True).count()
+    except Exception:
+        sampled_out = 0
     return jsonify({
         "jsonl":  {"size_kb": jsonl_kb},
         "sqlite": {"rows": sqlite_rows},
         "http":   {"received": len(_http_log), "failed": http_sink.failed},
         "otlp":   {"received": len(_otlp_log), "failed": otlp_sink.failed},
         "async":  {"http_dropped": async_http.dropped, "otlp_dropped": async_otlp.dropped},
+        "sampled_out": {"count": sampled_out},
     })
 
 

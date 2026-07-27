@@ -78,6 +78,14 @@
           </div>
         </div>
 
+        <div class="action-card" data-label="sampled failure sampling">
+          <div class="card-top">
+            <span class="card-name">Sampled failure</span>
+            <button class="btn btn-xs btn-danger" onclick="sampledFailure()">Run</button>
+          </div>
+          <div class="card-hint">Sampled out (0%), but the failure is still recorded — see Explore.</div>
+        </div>
+
         <div class="action-card" data-label="user login auth">
           <div class="card-top">
             <span class="card-name">User login</span>
@@ -222,6 +230,21 @@
 
             </div><!-- /.sink-cards -->
           </div><!-- /sinks section -->
+
+          <!-- Observable signals (trace-level, not sinks) -->
+          <div class="explore-section">
+            <div class="insp-section-label">Signals</div>
+            <div class="sink-cards">
+              <div class="sink-card">
+                <div class="sink-card-header">
+                  <div class="sink-dot" id="sink-dot-sampled"></div>
+                  <div class="sink-name">SAMPLED-OUT ERRORS</div>
+                </div>
+                <div class="sink-stat" id="stat-sampled-out">0</div>
+                <div class="sink-detail">Failures recorded from sampled-out traces (<code>sampled_out=true</code>)</div>
+              </div>
+            </div>
+          </div><!-- /signals section -->
 
           <!-- TraceLog query builder -->
           <div class="explore-section">

@@ -178,6 +178,12 @@ header {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.card-hint {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-faint);
+  margin-top: 5px;
+}
 .card-inputs {
   display: flex;
   flex-direction: column;

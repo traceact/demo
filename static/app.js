@@ -84,6 +84,10 @@ async function triggerError() {
   await fire('/api/trigger-error', {}, 'error.trigger');
 }
 
+async function sampledFailure() {
+  await fire('/api/sampled-failure', {}, 'sampled.failure');
+}
+
 async function authLogin() {
   const username = document.getElementById('login-username').value.trim() || 'alice';
   await fire('/api/auth-login', { username }, 'auth.login');
@@ -639,6 +643,11 @@ function updateSinkCards(stats, otlpLog) {
     otlpDetail.textContent  = 'Waiting for delivery…';
     otlpToggle.style.display = 'none';
   }
+
+  // Signals — sampled-out error count (a trace-level signal, not a sink).
+  const sampledOut = stats.sampled_out?.count ?? 0;
+  setSinkDot('sampled', sampledOut > 0 ? 'active' : '');
+  document.getElementById('stat-sampled-out').textContent = sampledOut;
 }
 
 function setSinkDot(name, cls) {
