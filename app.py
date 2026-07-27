@@ -81,6 +81,7 @@ async_http  = AsyncSink([http_sink])
 async_otlp  = AsyncSink([otlp_sink])
 
 configure(
+    project="traceact",
     config=TraceConfig(sink_mode="blocking"),
     sinks=[JsonlSink(TRACES_FILE), sqlite_sink, async_http, async_otlp],
 )
