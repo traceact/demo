@@ -425,6 +425,8 @@ function renderTraceMap(trace) {
   if (!trace) {
     container.innerHTML = `<div class="map-empty">Select a trace from the Traces tab and click "View map →" to visualize it here.</div>`;
     if (labelEl) labelEl.textContent = 'Select a trace to view its map.';
+    mapZoom.lastTraceId = null;
+    resetMapZoom();
     return;
   }
 
@@ -552,6 +554,98 @@ function renderTraceMap(trace) {
 
   svg += `</svg>`;
   container.innerHTML = svg;
+
+  // A new trace starts at 1×; re-rendering the same one keeps the current view.
+  if (trace.trace_id !== mapZoom.lastTraceId) {
+    mapZoom.scale = 1; mapZoom.tx = 0; mapZoom.ty = 0;
+    mapZoom.lastTraceId = trace.trace_id;
+  }
+  applyMapTransform();
+}
+
+// ---------------------------------------------------------------------------
+// Map zoom and pan — wheel to zoom around the cursor, drag to pan.
+// ---------------------------------------------------------------------------
+
+const mapZoom = { scale: 1, tx: 0, ty: 0, lastTraceId: null };
+
+function applyMapTransform() {
+  const canvas = document.getElementById('map-canvas');
+  if (canvas) {
+    canvas.style.transform =
+      `translate(${mapZoom.tx}px, ${mapZoom.ty}px) scale(${mapZoom.scale})`;
+  }
+}
+
+/* Zoom by `factor` about a viewport point, keeping whatever sits under that
+ * point pinned in place. Defaults to the centre of the visible area, which is
+ * what the toolbar buttons want.
+ *
+ * The anchor is measured against the canvas's own rect, which already reflects
+ * the current transform. That keeps the maths independent of the wrapper's
+ * padding and borders, which otherwise offset the transform origin and make
+ * each wheel step drift. */
+function zoomMapBy(factor, clientX, clientY) {
+  const wrap = document.getElementById('map-canvas-wrap');
+  const canvas = document.getElementById('map-canvas');
+  if (!wrap || !canvas) return;
+
+  const wrapRect = wrap.getBoundingClientRect();
+  if (clientX == null) clientX = wrapRect.left + wrap.clientWidth / 2;
+  if (clientY == null) clientY = wrapRect.top + wrap.clientHeight / 2;
+
+  const next = Math.max(0.2, Math.min(5, mapZoom.scale * factor));
+  const rect = canvas.getBoundingClientRect();
+  const contentX = (clientX - rect.left) / mapZoom.scale;
+  const contentY = (clientY - rect.top) / mapZoom.scale;
+
+  mapZoom.tx += (clientX - contentX * next) - rect.left;
+  mapZoom.ty += (clientY - contentY * next) - rect.top;
+  mapZoom.scale = next;
+  applyMapTransform();
+}
+
+function resetMapZoom() {
+  mapZoom.scale = 1; mapZoom.tx = 0; mapZoom.ty = 0;
+  applyMapTransform();
+}
+
+function wireMapZoom() {
+  const wrap = document.getElementById('map-canvas-wrap');
+  if (!wrap) return;
+
+  wrap.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    zoomMapBy(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX, e.clientY);
+  }, { passive: false });
+
+  // Pan. Tracked on window so a fast drag that leaves the pane still ends.
+  let drag = null;
+  wrap.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    drag = { x: e.clientX - mapZoom.tx, y: e.clientY - mapZoom.ty };
+    wrap.classList.add('dragging');
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!drag) return;
+    mapZoom.tx = e.clientX - drag.x;
+    mapZoom.ty = e.clientY - drag.y;
+    applyMapTransform();
+  });
+  window.addEventListener('mouseup', () => {
+    if (!drag) return;
+    drag = null;
+    wrap.classList.remove('dragging');
+  });
+
+  const btn = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', fn);
+  };
+  btn('zoom-in',    () => zoomMapBy(1.25));
+  btn('zoom-out',   () => zoomMapBy(1 / 1.25));
+  btn('zoom-reset', resetMapZoom);
 }
 
 function kindCssVar(kind) {
@@ -948,4 +1042,5 @@ function setStatus(msg) {
 window.addEventListener('DOMContentLoaded', () => {
   loadTraces();
   initSidebarDrag();
+  wireMapZoom();
 });

@@ -852,10 +852,33 @@ header {
 .map-pane-label .badge { margin: 0 6px; }
 .map-canvas-wrap {
   flex: 1;
-  overflow: auto;
+  overflow: hidden;
   padding: 28px 24px;
+  position: relative;
+  cursor: grab;
+  user-select: none;
 }
-.map-canvas { min-height: 160px; }
+.map-canvas-wrap.dragging { cursor: grabbing; }
+.map-canvas {
+  min-height: 160px;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.zoom-controls { display: flex; gap: 4px; flex-shrink: 0; }
+
+.zoom-btn {
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 5px;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+.zoom-btn:hover { background: var(--bg-hover); }
 .map-empty {
   color: var(--text-faint);
   font-size: 12.5px;

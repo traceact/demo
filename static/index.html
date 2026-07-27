@@ -285,8 +285,13 @@
       <div id="pane-map" class="tab-pane">
         <div class="map-pane-toolbar">
           <span id="map-pane-label" class="map-pane-label">Select a trace to view its map.</span>
+          <div class="zoom-controls">
+            <button class="zoom-btn" id="zoom-in" title="Zoom in">+</button>
+            <button class="zoom-btn" id="zoom-out" title="Zoom out">−</button>
+            <button class="zoom-btn" id="zoom-reset" title="Reset zoom">⟲</button>
+          </div>
         </div>
-        <div class="map-canvas-wrap">
+        <div class="map-canvas-wrap" id="map-canvas-wrap">
           <div id="map-canvas" class="map-canvas">
             <div class="map-empty">Select a trace from the Traces tab and click "View map →" to visualize it here.</div>
           </div>
