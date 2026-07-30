@@ -29,7 +29,11 @@
          ================================================================ -->
     <aside id="sidebar">
       <div class="sidebar-header">
-        <div class="sidebar-title">Fire an action</div>
+        <div class="sidebar-title-row">
+          <div class="sidebar-title">Fire an action</div>
+          <button class="pane-toggle" onclick="togglePane('sidebar')"
+                  title="Collapse actions pane" aria-label="Collapse actions pane">⟨</button>
+        </div>
         <input id="action-search" type="text" placeholder="Filter actions…"
                oninput="filterActions(this.value)" autocomplete="off" />
       </div>
@@ -135,6 +139,30 @@
           <div class="card-inputs">
             <input type="number" id="import-rows" placeholder="Row count" value="100" min="1" max="1000" />
           </div>
+        </div>
+
+        <div class="action-card" data-label="agent turn tools model">
+          <div class="card-top">
+            <span class="card-name">Agent turn</span>
+            <button class="btn btn-xs btn-primary" onclick="agentRun()">Run</button>
+          </div>
+          <p class="card-hint">One model call, two tool calls — python_repl fails by design, so you can watch a tool error roll up into the agent's trace. See it on the map.</p>
+        </div>
+
+        <div class="action-card" data-label="secret leak attempt redaction">
+          <div class="card-top">
+            <span class="card-name">Secret leak attempt</span>
+            <button class="btn btn-xs btn-danger" onclick="leakAttempt()">Run</button>
+          </div>
+          <p class="card-hint">Loads a config holding fake credentials under innocent field names. Open the trace's inputs and file event: the library stored [redacted:…] placeholders, never the values.</p>
+        </div>
+
+        <div class="action-card" data-label="card update capture transforms">
+          <div class="card-top">
+            <span class="card-name">Card update</span>
+            <button class="btn btn-xs btn-primary" onclick="cardUpdate()">Run</button>
+          </div>
+          <p class="card-hint">Captured inputs are transformed: user_id → hash, card_number → last 4. Run twice — the hash repeats.</p>
         </div>
 
       </div><!-- /#sidebar-actions -->
@@ -285,6 +313,13 @@
       <div id="pane-map" class="tab-pane">
         <div class="map-pane-toolbar">
           <span id="map-pane-label" class="map-pane-label">Select a trace to view its map.</span>
+          <div class="replay-controls">
+            <button class="zoom-btn" id="map-replay" title="Replay the trace">▶ replay</button>
+            <label class="replay-speed-label" for="map-speed">speed</label>
+            <input type="range" id="map-speed" min="2" max="10" step="1" value="2"
+                   title="Replay speed (2×–10×)" />
+            <span id="map-speed-value" class="replay-speed-label">2×</span>
+          </div>
           <div class="zoom-controls">
             <button class="zoom-btn" id="zoom-in" title="Zoom in">+</button>
             <button class="zoom-btn" id="zoom-out" title="Zoom out">−</button>
@@ -308,7 +343,11 @@
          ================================================================ -->
     <aside id="detail-pane">
       <div class="detail-pane-header">
-        <div class="detail-pane-title">Trace Inspector</div>
+        <div class="sidebar-title-row">
+          <div class="detail-pane-title">Trace Inspector</div>
+          <button class="pane-toggle" onclick="togglePane('detail-pane')"
+                  title="Collapse inspector pane" aria-label="Collapse inspector pane">⟩</button>
+        </div>
         <div id="map-label" class="detail-pane-trace-label">
           Fire an action or click a trace row.
         </div>
@@ -319,6 +358,14 @@
         </div>
       </div>
     </aside>
+
+    <!-- Edge buttons to reopen a collapsed pane; hidden unless collapsed -->
+    <button id="edge-expand-left" class="edge-expand edge-left" hidden
+            onclick="togglePane('sidebar')"
+            title="Expand actions pane" aria-label="Expand actions pane">⟩</button>
+    <button id="edge-expand-right" class="edge-expand edge-right" hidden
+            onclick="togglePane('detail-pane')"
+            title="Expand inspector pane" aria-label="Expand inspector pane">⟨</button>
 
   </div><!-- /.app-body -->
 

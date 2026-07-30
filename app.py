@@ -578,6 +578,132 @@ def payment_charge():
 
 
 # ---------------------------------------------------------------------------
+# Agent turn — tool-call tracking (kind="tool") and explicit parenting
+# ---------------------------------------------------------------------------
+#
+# Simulates one agent turn the way an adapter records it: a root agent.run
+# trace, a child model call, and two child tool calls — one of which fails.
+# The children are created with an explicit parent (ActionTrace.start(
+# parent=...)) rather than nesting, the same mechanism the LangChain adapter
+# uses when callbacks arrive on unrelated stacks. Select the agent.run trace
+# and open the map to watch the turn replay.
+
+@app.route("/api/agent-run", methods=["POST"])
+def agent_run():
+    data  = request.get_json() or {}
+    query = data.get("query", "What did we ship last week?")
+
+    root = ActionTrace.start(action="agent.run", kind="app", actor="agent")
+    root.step("Planning the turn")
+
+    # The model decides which tools to call.
+    model = ActionTrace.start(action="model.claude-sonnet-5", kind="model",
+                              actor="agent", parent=root)
+    time.sleep(0.012)
+    model.model(operation="completion", target="claude-sonnet-5",
+                tokens_in=830, tokens_out=112)
+    model.__exit__(None, None, None)
+    root.step("Model chose: web_search, python_repl")
+
+    # Tool 1 succeeds.
+    search = ActionTrace.start(action="tool.web_search", kind="tool",
+                               actor="agent", parent=root)
+    time.sleep(0.008)
+    search.tool(operation="call", target="web_search",
+                result={"results": 3}, duration_ms=8.0)
+    search.__exit__(None, None, None)
+
+    # Tool 2 fails BY DESIGN — the demo's point is watching a failed tool
+    # roll up into the agent's trace. The message says so, loudly, so the
+    # error can't be mistaken for a bug in the demo itself.
+    repl = ActionTrace.start(action="tool.python_repl", kind="tool",
+                             actor="agent", parent=root)
+    time.sleep(0.004)
+    err = RuntimeError(
+        "scripted demo failure: the python_repl tool raised "
+        "NameError: name 'df' is not defined")
+    repl.tool(operation="execute", target="python_repl",
+              status="failed", error={"type": "RuntimeError",
+                                      "message": str(err)})
+    repl.__exit__(type(err), err, None)
+
+    root.step("Composed answer from 3 search results")
+    root.__exit__(None, None, None)
+
+    return jsonify({"ok": True, "query": query, "tools_called": 2,
+                    "tools_failed": 1})
+
+
+# ---------------------------------------------------------------------------
+# Secret leak attempt — value-pattern redaction
+# ---------------------------------------------------------------------------
+#
+# An app loads a deployment config that happens to contain credential-shaped
+# values under innocent field names — the exact case field-name redaction
+# cannot catch. The route just does its work and records it; the redaction
+# happens inside the library at capture time. Proof lives in the record:
+# inputs hold "[redacted:aws-key]" / "[redacted:sk-token]" (prose intact),
+# and the file-read event's result is scrubbed the same way. The credentials
+# below are fake, and never reach the JSONL file either way.
+
+@app.route("/api/leak-attempt", methods=["POST"])
+def leak_attempt():
+    fake_aws = "AKIA" + "IOSFODNN7EXAMPLE"
+    fake_sk  = "sk-" + "proj4bcd5fgh6jkl7nopq8st"
+
+    with ActionTrace.start(action="config.load", kind="app",
+                           actor="user") as trace:
+        trace.step("Reading deployment config")
+        time.sleep(0.004)
+        config = {
+            "region": "eu-west-1",
+            "location": fake_aws,  # a key hiding in an innocent field name
+            "note": f"deploy to staging with {fake_sk} before Friday",
+        }
+        trace.input(config)
+        trace.file(operation="read", target="deploy.env",
+                   result={"raw": f"AWS_ACCESS_KEY={fake_aws}"})
+        trace.step("Config loaded")
+
+    return jsonify({"ok": True,
+                    "hint": "open the trace: inputs and the file event's "
+                            "result hold [redacted:…] placeholders"})
+
+
+# ---------------------------------------------------------------------------
+# Card update — capture transforms (hash / last4)
+# ---------------------------------------------------------------------------
+#
+# @traced_action captures arguments through per-field transforms: the user ID
+# is stored as a deterministic hash (same user, same hash, every run — try it
+# twice), the card number keeps only its tail, and the raw values never reach
+# the record. "card_number" would normally be name-redacted to "[redacted]";
+# the explicit transform is the handling instruction, so "…4242" survives.
+
+@traced_action(
+    action="card.update",
+    kind="app",
+    actor="user",
+    capture_inputs=["user_id:hash", "card_number:last4", "amount"],
+)
+def _update_card(user_id, card_number, amount):
+    time.sleep(0.006)
+    return {"updated": True}
+
+
+@app.route("/api/card-update", methods=["POST"])
+def card_update():
+    data = request.get_json() or {}
+    _update_card(
+        user_id=data.get("user_id", "user_12345"),
+        card_number=data.get("card_number", "4242424242424242"),
+        amount=data.get("amount", 49.99),
+    )
+    return jsonify({"ok": True,
+                    "hint": "inputs show sha256:… and …4242, never the raw values"})
+
+
+# ---------------------------------------------------------------------------
 # Sink echo endpoints — receive deliveries from HttpSink / OtlpSink
 # ---------------------------------------------------------------------------
 

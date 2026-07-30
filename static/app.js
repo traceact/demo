@@ -115,6 +115,49 @@ async function orderSubmit() {
   await fire('/api/order-submit', {}, 'order.submit');
 }
 
+async function agentRun() {
+  await fire('/api/agent-run', {}, 'agent.run');
+}
+
+// ---------------------------------------------------------------------------
+// Pane collapse — sidebar (left) and inspector (right)
+// ---------------------------------------------------------------------------
+//
+// Each pane folds away with the ⟨ / ⟩ button in its header; a slim button on
+// the window edge brings it back. State survives reloads via localStorage.
+
+const PANE_EDGE_BUTTON = {
+  'sidebar':     { edge: 'edge-expand-left',  handle: 'drag-handle' },
+  'detail-pane': { edge: 'edge-expand-right', handle: 'drag-handle-right' },
+};
+
+function togglePane(paneId) {
+  const spec = PANE_EDGE_BUTTON[paneId];
+  if (!spec) return;
+  const pane = document.getElementById(paneId);
+  const collapsed = pane.classList.toggle('collapsed');
+  document.getElementById(spec.handle).classList.toggle('collapsed', collapsed);
+  document.getElementById(spec.edge).hidden = !collapsed;
+  try { localStorage.setItem(`demo-pane-${paneId}`, collapsed ? '1' : '0'); }
+  catch (e) { /* private mode; state just won't persist */ }
+}
+
+function restorePaneState() {
+  for (const paneId of Object.keys(PANE_EDGE_BUTTON)) {
+    let saved = null;
+    try { saved = localStorage.getItem(`demo-pane-${paneId}`); } catch (e) {}
+    if (saved === '1') togglePane(paneId);
+  }
+}
+
+async function leakAttempt() {
+  await fire('/api/leak-attempt', {}, 'config.load');
+}
+
+async function cardUpdate() {
+  await fire('/api/card-update', {}, 'card.update');
+}
+
 async function clearTraces() {
   setStatus('Clearing traces…');
   try {
@@ -513,14 +556,16 @@ function renderTraceMap(trace) {
     svg += `<text x="${BOX_LEFT + 14}" y="${boxTop + BOX_PAD_T + STEP_H / 2}" dominant-baseline="middle"
           font-size="10.5" fill="var(--text-faint)" font-family="var(--mono)">no steps recorded</text>`;
   }
+  // Each step is its own reveal group so the replay can tick them in one at
+  // a time, in the order they were recorded.
   steps.forEach((s, i) => {
     const sy = boxTop + BOX_PAD_T + i * STEP_H + STEP_H / 2;
-    svg += `
+    svg += `<g class="map-anim" data-order="${i}">
       <text x="${BOX_LEFT + 14}" y="${sy}" dominant-baseline="middle"
             font-size="10" fill="var(--accent)" font-family="var(--mono)">✓</text>
       <text x="${BOX_LEFT + 28}" y="${sy}" dominant-baseline="middle"
             font-size="10.5" fill="var(--text-dim)" font-family="var(--mono)">${escapeHtml(truncateStr(s.label, 22))}</text>
-    `;
+    </g>`;
   });
 
   // Resource nodes + bezier lines
@@ -531,20 +576,18 @@ function renderTraceMap(trace) {
     const exitY = M === 1 ? midY : boxTop + 15 + (BOX_H - 30) * i / (M - 1);
     const midX  = BOX_RIGHT + (RES_LEFT - BOX_RIGHT) * 0.5;
 
-    svg += `
+    // Connector and node reveal together, after all the steps.
+    const tkindCol = kindCssVar(touch.kind);
+    svg += `<g class="map-anim" data-order="${steps.length + i}">
       <path d="M ${BOX_RIGHT} ${exitY} C ${midX} ${exitY} ${midX} ${rmidY} ${RES_LEFT - 4} ${rmidY}"
             fill="none" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#ta-arrow)" />
-    `;
-
-    const tkindCol = kindCssVar(touch.kind);
-    svg += `
       <rect x="${RES_LEFT}" y="${ry}" width="${RES_W}" height="${RES_H}" rx="6"
             fill="var(--bg-card)" stroke="${tkindCol}" stroke-width="1.5" />
       <text x="${RES_LEFT + 10}" y="${ry + 14}" dominant-baseline="middle"
             font-size="9" font-weight="700" fill="${tkindCol}" font-family="var(--mono)">${escapeHtml((touch.kind || '').toUpperCase())}</text>
       <text x="${RES_LEFT + 10}" y="${ry + 30}" dominant-baseline="middle"
             font-size="11.5" fill="var(--text)" font-family="var(--mono)">${escapeHtml(truncateStr(touch.target || '—', 20))}</text>
-    `;
+    </g>`;
   });
 
   if (M === 0) {
@@ -556,11 +599,20 @@ function renderTraceMap(trace) {
   container.innerHTML = svg;
 
   // A new trace starts at 1×; re-rendering the same one keeps the current view.
-  if (trace.trace_id !== mapZoom.lastTraceId) {
+  const isNewTrace = trace.trace_id !== mapZoom.lastTraceId;
+  if (isNewTrace) {
     mapZoom.scale = 1; mapZoom.tx = 0; mapZoom.ty = 0;
     mapZoom.lastTraceId = trace.trace_id;
   }
   applyMapTransform();
+
+  // Replay the reveal on a newly selected trace; a re-render of the same
+  // trace (zoom, tab switch back) shows everything without re-animating.
+  if (isNewTrace) {
+    playMapReplay();
+  } else {
+    container.querySelectorAll('.map-anim').forEach((g) => g.classList.add('shown'));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +620,56 @@ function renderTraceMap(trace) {
 // ---------------------------------------------------------------------------
 
 const mapZoom = { scale: 1, tx: 0, ty: 0, lastTraceId: null };
+
+// ---------------------------------------------------------------------------
+// Map replay — sequential reveal of steps then resources, like the viewer's
+// trace map. Speed is 2×–10× against a 700ms-per-item base, persisted.
+// ---------------------------------------------------------------------------
+
+const mapReplay = {
+  timers: [],
+  speed: (() => {
+    try { return parseInt(localStorage.getItem('demo-map-speed'), 10) || 2; }
+    catch (e) { return 2; }
+  })(),
+};
+
+const REPLAY_BASE_MS = 700; // per item at 1×
+
+function playMapReplay() {
+  // Cancel any run still ticking from a previous trace.
+  mapReplay.timers.forEach(clearTimeout);
+  mapReplay.timers = [];
+
+  const groups = [...document.querySelectorAll('#map-canvas .map-anim')]
+    .sort((a, b) => (+a.dataset.order) - (+b.dataset.order));
+  groups.forEach((g) => g.classList.remove('shown'));
+
+  const interval = REPLAY_BASE_MS / mapReplay.speed;
+  groups.forEach((g, i) => {
+    mapReplay.timers.push(setTimeout(() => g.classList.add('shown'),
+                                     (i + 1) * interval));
+  });
+}
+
+function wireMapReplay() {
+  const btn      = document.getElementById('map-replay');
+  const slider   = document.getElementById('map-speed');
+  const valueEl  = document.getElementById('map-speed-value');
+  if (!btn || !slider) return;
+
+  slider.value = mapReplay.speed;
+  if (valueEl) valueEl.textContent = `${mapReplay.speed}×`;
+
+  slider.addEventListener('input', () => {
+    mapReplay.speed = parseInt(slider.value, 10) || 2;
+    if (valueEl) valueEl.textContent = `${mapReplay.speed}×`;
+    try { localStorage.setItem('demo-map-speed', String(mapReplay.speed)); }
+    catch (e) { /* private mode */ }
+  });
+
+  btn.addEventListener('click', playMapReplay);
+}
 
 function applyMapTransform() {
   const canvas = document.getElementById('map-canvas');
@@ -1043,4 +1145,6 @@ window.addEventListener('DOMContentLoaded', () => {
   loadTraces();
   initSidebarDrag();
   wireMapZoom();
+  wireMapReplay();
+  restorePaneState();
 });
