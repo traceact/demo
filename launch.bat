@@ -34,15 +34,15 @@ echo =^> Activated .venv
 
 REM ── 3. Dependencies ──────────────────────────────────────────────────────────
 echo =^> Checking dependencies ...
+REM traceact comes from PyPI; GitHub is the fallback for when the required
+REM version isn't released yet. NEVER install it from a local folder.
 pip install --quiet -r requirements.txt
-
-python -c "import traceact" >nul 2>&1
 if errorlevel 1 (
-  if exist "..\traceact\" (
-    echo =^> Installing traceact from ..\traceact ...
-    pip install --quiet -e ..\traceact
-  ) else (
-    echo ERROR: traceact package not found. Expected at ..\traceact relative to this folder.
+  echo =^> Required traceact not on PyPI yet — falling back to GitHub ...
+  pip install --quiet "flask>=3.0"
+  pip install --quiet "traceact @ git+https://github.com/traceact/traceact"
+  if errorlevel 1 (
+    echo ERROR: could not install traceact from PyPI or GitHub.
     pause
     exit /b 1
   )

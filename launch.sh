@@ -30,13 +30,14 @@ echo "==> Activated .venv"
 
 # ── 3. Dependencies ───────────────────────────────────────────────────────────
 echo "==> Checking dependencies ..."
-pip install --quiet -r requirements.txt
-if ! python -c "import traceact" &>/dev/null; then
-  if [ -d "$SCRIPT_DIR/../traceact" ]; then
-    echo "==> Installing traceact from ../traceact ..."
-    pip install --quiet -e "$SCRIPT_DIR/../traceact"
-  else
-    echo "ERROR: traceact package not found. Expected at ../traceact relative to this folder."
+# traceact comes from PyPI; GitHub is the fallback for when the required
+# version isn't released yet. NEVER install it from a local folder — a fork
+# of this demo must run anywhere on the published package alone.
+if ! pip install --quiet -r requirements.txt; then
+  echo "==> Required traceact not on PyPI yet — falling back to GitHub ..."
+  pip install --quiet "flask>=3.0"
+  if ! pip install --quiet "traceact @ git+https://github.com/traceact/traceact"; then
+    echo "ERROR: could not install traceact from PyPI or GitHub."
     exit 1
   fi
 fi

@@ -1,2 +1,8 @@
 flask>=3.0
--e ../traceact
+# traceact comes from PyPI — that's the point of publishing it there. The
+# launchers fall back to GitHub when the required version isn't on PyPI yet
+# (a demo tracking an unreleased feature):
+#   pip install "traceact @ git+https://github.com/traceact/traceact"
+# Never install it from a local folder: forks of this demo must run
+# anywhere on the published package alone.
+traceact>=0.13.0

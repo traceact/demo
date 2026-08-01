@@ -37,6 +37,11 @@ from datetime import datetime
 
 from flask import Flask, jsonify, request, send_from_directory
 
+# traceact comes from PyPI (`pip install traceact`), with GitHub as the
+# fallback — see requirements.txt and the launchers. Never install it from a
+# local folder: a fork of this demo must run anywhere on the published
+# package alone, and an editable install would bake one machine's absolute
+# path into the venv.
 from traceact import (
     ActionTrace,
     AsyncSink,
@@ -49,9 +54,11 @@ from traceact import (
     TraceConfig,
     TraceLog,
     configure,
+    inject_context,
     inject_headers,
     traced_action,
 )
+from traceact.context import get_active_trace
 
 # ---------------------------------------------------------------------------
 # TraceAct configuration
@@ -701,6 +708,125 @@ def card_update():
     )
     return jsonify({"ok": True,
                     "hint": "inputs show sha256:… and …4242, never the raw values"})
+
+
+# ---------------------------------------------------------------------------
+# Event-level inputs — capture_event_inputs opt-in
+# ---------------------------------------------------------------------------
+#
+# Runs the same product search twice. The first trace opts into
+# capture_event_inputs at the trace level, so each event's input= lands in
+# the record: the DB event holds the exact filter dict behind the query, the
+# HTTP event holds the SKU list it posted. The second trace runs the
+# identical code on the default config — same events, but every "input"
+# field is null, which is the package's lean default. Compare the two traces
+# side by side; note the password-named field inside the verbose trace's
+# input arrives as "[redacted]" (the safety pipeline applies to event inputs
+# the same way it applies to trace.input()).
+
+def _product_search(trace, category, max_price):
+    trace.step("Querying product catalogue")
+    time.sleep(0.006)
+    trace.db(operation="select", target="products",
+             input={"category": category, "max_price": max_price,
+                    "limit": 25, "api_password": "fake-demo-secret"},
+             rows=8, duration_ms=6.1)
+    trace.step("Checking stock for 8 matches")
+    time.sleep(0.005)
+    trace.http(operation="post", target="inventory-service",
+               input={"skus": ["sku_101", "sku_204", "sku_318"]},
+               status_code=200, duration_ms=5.2)
+    trace.output({"matches": 8, "in_stock": 6})
+
+
+@app.route("/api/event-inputs", methods=["POST"])
+def event_inputs():
+    data      = request.get_json() or {}
+    category  = data.get("category", "keyboards")
+    max_price = data.get("max_price", 120)
+
+    # Verbose: this trace opts in, so event input= is recorded.
+    with ActionTrace.start(
+        action="search.verbose", kind="app", actor="user",
+        config=TraceConfig(capture_event_inputs=True),
+    ) as trace:
+        trace.input({"category": category, "max_price": max_price})
+        _product_search(trace, category, max_price)
+
+    # Lean: identical code, default config — every event's input is null.
+    with ActionTrace.start(action="search.lean", kind="app",
+                           actor="user") as trace:
+        trace.input({"category": category, "max_price": max_price})
+        _product_search(trace, category, max_price)
+
+    return jsonify({"ok": True,
+                    "hint": "compare the db/http events of search.verbose "
+                            "(input recorded, password redacted) with "
+                            "search.lean (input: null)"})
+
+
+# ---------------------------------------------------------------------------
+# Queue job — cross-process linking via inject_context / traceact_context
+# ---------------------------------------------------------------------------
+#
+# The producer trace publishes an export job and stamps its trace context
+# into the payload with inject_context(). The payload is JSON round-tripped
+# (that's what a real queue does to it) and handed to a worker function
+# decorated with @traced_action — in production that function runs in a
+# different process with no shared context at all. The reserved
+# traceact_context kwarg is consumed by the decorator: the worker never sees
+# it, and its trace comes out linked to the producer's via upstream_trace_id
+# and correlation_id. Select the export.request trace, copy its trace_id,
+# and find it again as upstream_trace_id on report.render.
+
+@traced_action(action="report.render", kind="job", actor="worker")
+def _render_report(user_id, fmt, message_id):
+    trace = get_active_trace()
+    trace.queue(operation="consume", target="exports",
+                message_id=message_id, attempt=1)
+    trace.step("Rendering report")
+    time.sleep(0.010)
+    trace.db(operation="select", target="report_rows", rows=42)
+    trace.file(operation="write", target=f"exports/report.{fmt}",
+               bytes_written=18_204)
+    trace.step("Report written")
+    trace.output({"path": f"exports/report.{fmt}", "rows": 42})
+    return {"rendered": True}
+
+
+@app.route("/api/queue-job", methods=["POST"])
+def queue_job():
+    data    = request.get_json() or {}
+    user_id = data.get("user_id", "user_12345")
+    fmt     = data.get("format", "pdf")
+    msg_id  = f"m_{uuid.uuid4().hex[:8]}"
+    corr_id = f"corr_{uuid.uuid4().hex[:12]}"
+
+    # Producer: publish the job and stamp trace context into the payload.
+    # The correlation ID is assigned here — inject_context() carries it (and
+    # the trace ID) across the boundary so the worker's trace shares it.
+    with ActionTrace.start(action="export.request", kind="app",
+                           actor="user", correlation_id=corr_id) as trace:
+        trace.input({"user_id": user_id, "format": fmt})
+        trace.step("Queueing export job")
+        trace.queue(operation="publish", target="exports", message_id=msg_id)
+        job = inject_context({"user_id": user_id, "format": fmt,
+                              "message_id": msg_id})
+        trace.output({"queued": True, "message_id": msg_id})
+
+    # The queue boundary: serialise → deserialise. The producer's trace is
+    # closed and its ambient context gone by the time the worker runs.
+    job = json.loads(json.dumps(job))
+
+    # Worker: the whole payload doubles as the context — only the
+    # traceact-* keys are read.
+    _render_report(job["user_id"], job["format"], job["message_id"],
+                   traceact_context=job)
+
+    return jsonify({"ok": True, "message_id": msg_id,
+                    "hint": "report.render's upstream_trace_id is "
+                            "export.request's trace_id; correlation_id "
+                            "matches on both"})
 
 
 # ---------------------------------------------------------------------------

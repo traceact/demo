@@ -165,6 +165,22 @@
           <p class="card-hint">Captured inputs are transformed: user_id → hash, card_number → last 4. Run twice — the hash repeats.</p>
         </div>
 
+        <div class="action-card" data-label="event inputs capture verbose lean">
+          <div class="card-top">
+            <span class="card-name">Event-level inputs</span>
+            <button class="btn btn-xs btn-primary" onclick="eventInputs()">Run</button>
+          </div>
+          <p class="card-hint">The same search twice: search.verbose opts into capture_event_inputs, so its db/http events record what went in (password field redacted); search.lean shows the default — input: null.</p>
+        </div>
+
+        <div class="action-card" data-label="queue job worker background upstream">
+          <div class="card-top">
+            <span class="card-name">Queue job</span>
+            <button class="btn btn-xs btn-primary" onclick="queueJob()">Run</button>
+          </div>
+          <p class="card-hint">A producer publishes an export job with inject_context(); a worker consumes it via the traceact_context kwarg. Two traces, linked: report.render's upstream_trace_id is export.request's trace_id.</p>
+        </div>
+
       </div><!-- /#sidebar-actions -->
     </aside>
 

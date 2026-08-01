@@ -22,9 +22,16 @@ Or manually:
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install -e ../traceact
 python app.py
 ```
+
+`traceact` installs from PyPI like any other dependency — fork this demo and it runs anywhere. If the demo tracks a traceact version that isn't released yet, install it from GitHub instead (the launchers do this fallback automatically):
+
+```bash
+pip install "traceact @ git+https://github.com/traceact/traceact"
+```
+
+Never install traceact from a local folder into this venv — an editable install bakes an absolute path that breaks on any other machine or account.
 
 Then open [http://localhost:5001](http://localhost:5001).
 

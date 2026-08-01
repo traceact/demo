@@ -158,6 +158,14 @@ async function cardUpdate() {
   await fire('/api/card-update', {}, 'card.update');
 }
 
+async function eventInputs() {
+  await fire('/api/event-inputs', {}, 'search.verbose');
+}
+
+async function queueJob() {
+  await fire('/api/queue-job', {}, 'export.request');
+}
+
 async function clearTraces() {
   setStatus('Clearing traces…');
   try {
